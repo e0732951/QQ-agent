@@ -1,0 +1,198 @@
+{
+  "id": "sovits-voice-reply",
+  "name": "GPT-SoVITS 语音回复",
+  "version": "1.3.2",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "把机器人本该打字发出来的回复，改用你本机 GPT-SoVITS 里自己训练/配置的音色念出来，以 QQ 原生语音发出去。确定性规则 + 零 token：不注册工具、不写提示词、不叫模型，只在「真正要发送」的那一下把文字换成语音。**插件开关就是语音接口的开关**：打开时接口没在运行会自动帮你拉起来，关掉时会让接口自己退出、释放端口和显存，不需要任何额外的启动脚本。太长、含链接/代码/路径等不适合朗读的内容仍按文字发；合成或发送失败会自动退回文字，消息不会丢，失败原因写在自己的运行日志里。",
+  "author": "本机定制",
+  "entry": "index.js",
+  "permissions": [
+    "web_fetch"
+  ],
+  "enabledByDefault": true,
+  "capabilities": [
+    "status.sovits-voice-reply"
+  ],
+  "requires": [],
+  "settings": {
+    "apiUrl": "http://127.0.0.1:9880",
+    "autoStartApi": true,
+    "pythonPath": "",
+    "apiScriptPath": "",
+    "apiWorkDir": "",
+    "apiStartTimeoutMs": 180000,
+    "configPath": "",
+    "sovitsWeightsPath": "",
+    "gptWeightsPath": "",
+    "refAudioPath": "",
+    "promptText": "",
+    "promptLang": "zh",
+    "textLang": "auto",
+    "maxChars": 60,
+    "minChars": 1,
+    "speedFactor": 1,
+    "alsoSendText": false,
+    "allowPrivate": true,
+    "skipChats": "",
+    "skipStructured": true,
+    "maxPerMinute": 10,
+    "timeoutMs": 180000,
+    "fileTtlMinutes": 30,
+    "deleteAfterSend": true,
+    "pathStyle": "file-url",
+    "quiet": false
+  },
+  "configSchema": {
+    "apiUrl": {
+      "type": "string",
+      "label": "GPT-SoVITS API 地址",
+      "description": "本机 GPT-SoVITS 服务地址，默认 http://127.0.0.1:9880（api_v2.py 的默认端口）。启动时改过端口就填你实际用的那个。"
+    },
+    "autoStartApi": {
+      "type": "boolean",
+      "label": "接口没运行时自动帮你启动",
+      "description": "默认开。开机后只要开 QQ Agent，插件会自己在后台把 GPT-SoVITS 语音接口拉起来（不弹黑窗口），你不用再手动开第二个程序。想自己控制、不想让它常驻就关掉，然后双击 GPT-SoVITS 目录里的「启动语音接口.bat」。"
+    },
+    "pythonPath": {
+      "type": "string",
+      "label": "python 解释器路径（想自动启动才填）",
+      "description": "留空 = 不自动启动，你自己先开好 GPT-SoVITS 接口就行。想让它自动启动就填：整合包一般是 <GPT-SoVITS 根目录>\\runtime\\python.exe。"
+    },
+    "apiScriptPath": {
+      "type": "string",
+      "label": "api_v2.py 路径（想自动启动才填）",
+      "description": "GPT-SoVITS 的接口脚本。整合包一般是 <GPT-SoVITS 根目录>\\api_v2.py。留空 = 不自动启动。"
+    },
+    "apiWorkDir": {
+      "type": "string",
+      "label": "GPT-SoVITS 根目录（想自动启动就填）",
+      "description": "必须是 api_v2.py 所在那一层（脚本里的模型路径都相对它写）。两个用处：① 自动启动接口时的工作目录；② 上面填**相对路径**的权重时按它解析 —— 底模文档里给的就是相对路径，填了它就能直接照抄。"
+    },
+    "apiStartTimeoutMs": {
+      "type": "number",
+      "label": "等接口启动的最长时间（毫秒）",
+      "description": "默认 180000（3 分钟）。首次要加载模型，1~3 分钟很正常；超了就把原因写进 api-server.log 并让这条消息走文字。"
+    },
+    "configPath": {
+      "type": "string",
+      "label": "音色配置文件（可选）",
+      "description": "留空时自动找 %LOCALAPPDATA%\\QQAgentVoice\\config.json —— 也就是「自训练语音回复」插件用的那份。找到就直接复用它的 voices 配置，不用在这里再填一遍路径。"
+    },
+    "sovitsWeightsPath": {
+      "type": "string",
+      "label": "SoVITS 权重（可不填，训练模型或底模都行）",
+      "description": "留空 = 直接用你接口端已经加载好的权重（最省事，推荐）。填了会在每次合成前切到这份权重 —— **不只是你训练的模型，底模（预训练模型）也能填**：v2ProPlus 的底模是 GPT_SoVITS/pretrained_models/v2Pro/s2Gv2ProPlus.pth。可以用绝对路径，也可以填相对路径（按下面「GPT-SoVITS 根目录」解析）。⚠️ 别填 s2D 开头的文件，那是判别器，推理用不上。"
+    },
+    "gptWeightsPath": {
+      "type": "string",
+      "label": "GPT 权重（可不填，训练模型或底模都行）",
+      "description": "和上一项**成对**的 GPT 模型路径。留空 = 不调用 /set_gpt_weights（服务端自己加载好了）。配底模时：v2ProPlus 用 GPT_SoVITS/pretrained_models/s1v3.ckpt。⚠️ 两者必须**同一代**（v1 / v2 / v2Pro / v2ProPlus），混着填会加载失败或声音不正常。"
+    },
+    "refAudioPath": {
+      "type": "string",
+      "label": "参考音频（必填）",
+      "description": "3~10 秒、干净无背景音乐的 wav。**音色由它决定**：用训练模型时它提供语气和情绪，用底模时它就是全部音色来源（给谁的声音就学谁，零样本克隆）。音频越干净，念出来越像。"
+    },
+    "promptText": {
+      "type": "string",
+      "multiline": true,
+      "label": "参考文本（必填）",
+      "description": "参考音频里「原原本本说的那句话」的文字，必须逐字一致（含标点）。写得不对音色会飘、语调会怪。"
+    },
+    "promptLang": {
+      "type": "enum",
+      "values": [
+        "zh",
+        "ja",
+        "en",
+        "ko",
+        "yue"
+      ],
+      "label": "参考音频的语言",
+      "description": "参考音频说的是什么语言就选哪个。中文参考音频配中文文本用 zh 即可。"
+    },
+    "textLang": {
+      "type": "enum",
+      "values": [
+        "auto",
+        "zh",
+        "ja",
+        "en",
+        "ko",
+        "yue"
+      ],
+      "label": "要念的文字按什么语言合成",
+      "description": "默认 auto：含日文假名按日语、纯英文按英语、其余按中文。中英混排一般用 auto 或 zh 都行。"
+    },
+    "maxChars": {
+      "type": "number",
+      "label": "超过多少字就不转语音",
+      "description": "默认 60 字。超了直接发文字 —— QQ 语音太长会被拒收，念出来也像念稿。想让它什么都念就调大。"
+    },
+    "minChars": {
+      "type": "number",
+      "label": "少于多少字不转语音",
+      "description": "默认 1。设成 3 可以避免「嗯」「好」这种一个字的语音。"
+    },
+    "speedFactor": {
+      "type": "number",
+      "label": "语速",
+      "description": "1 = 原速，0.9 通常更自然一点，高于 1.2 会明显含糊。"
+    },
+    "alsoSendText": {
+      "type": "boolean",
+      "label": "语音之外再补一条同样的文字",
+      "description": "默认关（只发语音）。打开后同一句会先发语音、再发一遍文字，方便不方便听语音的人。"
+    },
+    "allowPrivate": {
+      "type": "boolean",
+      "label": "私聊也转语音",
+      "description": "默认开。关掉就只在群里发语音，私聊照旧打字。"
+    },
+    "skipChats": {
+      "type": "string",
+      "label": "不转语音的会话",
+      "description": "填 group:870817228 这种（多个用逗号分隔）。工作群、正经群可以放这里，让它们只收文字。"
+    },
+    "skipStructured": {
+      "type": "boolean",
+      "label": "结构化内容仍发文字",
+      "description": "默认开：含链接、代码块、CQ 码、文件路径、[object Object] 的内容不朗读，直接发文字。关掉就是字面意义的「全部转语音」。"
+    },
+    "maxPerMinute": {
+      "type": "number",
+      "label": "每分钟最多合成几条",
+      "description": "默认 10。超出的部分当次直接发文字 —— 既防刷屏，也防把本机显卡/服务端打满导致整轮对话卡住。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "单条合成超时（毫秒）",
+      "description": "默认 180000（3 分钟）。超时这一条就改发文字，不会把整轮对话卡死。"
+    },
+    "fileTtlMinutes": {
+      "type": "number",
+      "label": "临时语音保留时间（分钟）",
+      "description": "默认 30。只在关掉下面那个开关时才有意义（那时相同内容会复用缓存）；另外每次启动插件也会按这个时长清扫一次上一轮遗留的文件。"
+    },
+    "deleteAfterSend": {
+      "type": "boolean",
+      "label": "语音发完就删掉本地文件",
+      "description": "默认开：语音发给协议端之后，本地那份 wav 立刻删除，硬盘上不留东西。关掉则会按内容缓存复用（同一句话不用重复合成，更快），代价是文件要等「保留时间」到了才清。"
+    },
+    "pathStyle": {
+      "type": "enum",
+      "values": [
+        "file-url",
+        "plain"
+      ],
+      "label": "发给协议端的路径格式",
+      "description": "默认 file-url（file:///C:/...）。协议端不认时改成 plain（C:\\...）。插件本身会把两种都试一遍，这里只决定先试哪个。"
+    },
+    "quiet": {
+      "type": "boolean",
+      "label": "安静模式（不写运行日志）",
+      "description": "默认关：每转一条语音都往项目日志写一行，方便你看它到底有没有在工作。打开就不写。"
+    }
+  }
+}

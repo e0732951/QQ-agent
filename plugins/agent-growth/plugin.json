@@ -1,0 +1,103 @@
+{
+  "id": "agent-growth",
+  "name": "人格成长引擎",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "让角色像真人一样长大：有生日、年龄随现实时间增长（默认现实1个月=虚拟1岁）；自动沉淀聊天中的真实经历（亲身互动 + 群内见闻），攒够一批或每逢生日时交给模型消化，让 TA 自己写出「成长阶段提示词」并每轮注入——性格由 TA 的真实经历长出来，且始终以当前人设为锚，只许自然延伸、不跑偏。自带可视化成长档案页（data/growth/成长档案.html）与成长查询/记录工具；与「鲸鱼娘·女儿版人设」插件自动配合（爸爸QQ自动读取，未安装也不影响），与记忆类、生活类插件零冲突。装完即用，无需必填配置。",
+  "author": "本地",
+  "enabledByDefault": true,
+  "capabilities": [],
+  "requires": [],
+  "settings": {
+    "enabled": true,
+    "growthDaysPerYear": 30,
+    "startAge": 8,
+    "ownerUserIds": "",
+    "digestMinMemories": 25,
+    "maxMemories": 800,
+    "captureGroup": true,
+    "capturePrivate": true,
+    "captureMaxLength": 120,
+    "digestCooldownMin": 30,
+    "celebrateBirthday": true,
+    "maxStagesInPrompt": 12,
+    "digestModel": "",
+    "extraAnchor": ""
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用人格成长",
+      "description": "关闭后不再记录经历、不再沉淀成长阶段，也不注入成长提示词（已存数据保留在磁盘上不删）。"
+    },
+    "growthDaysPerYear": {
+      "type": "number",
+      "label": "成长速度：现实几天 = 1 岁",
+      "description": "默认 30，即现实 1 个月 = 虚拟 1 岁。改成 7 就是一周一岁，改成 365 就和真人一样慢。"
+    },
+    "startAge": {
+      "type": "number",
+      "label": "初始年龄（仅首次建档生效）",
+      "description": "第一次启用时角色从几岁开始长。默认 8 岁。想调整已有角色的年龄：关闭插件后删除 data/growth/profile.json 再开启即可按新值重建。"
+    },
+    "ownerUserIds": {
+      "type": "string",
+      "label": "爸爸的 QQ 号（可选）",
+      "description": "多个用逗号分隔。留空则自动读取「鲸鱼娘·女儿版人设」插件里填的号码。爸爸的互动会被标记出来，沉淀成长时优先参考。"
+    },
+    "digestMinMemories": {
+      "type": "number",
+      "label": "触发沉淀的最少经历条数",
+      "description": "攒够这么多条新经历才自动消化一次（太频繁会多花 token）。默认 25 条。"
+    },
+    "maxMemories": {
+      "type": "number",
+      "label": "互动记忆总量上限",
+      "description": "防无限膨胀，超出后淘汰最旧的已消化记录。默认 800 条。"
+    },
+    "captureGroup": {
+      "type": "boolean",
+      "label": "记录群聊里的经历",
+      "description": "关闭后群聊消息不进入成长素材。"
+    },
+    "capturePrivate": {
+      "type": "boolean",
+      "label": "记录私聊里的经历",
+      "description": "关闭后私聊消息不进入成长素材。"
+    },
+    "captureMaxLength": {
+      "type": "number",
+      "label": "单条经历截断长度",
+      "description": "超过这个字数的消息只保留前半段。默认 120 字。"
+    },
+    "digestCooldownMin": {
+      "type": "number",
+      "label": "两次沉淀的最小间隔（分钟）",
+      "description": "防止频繁调用模型。默认 30 分钟；生日沉淀不受此限制。"
+    },
+    "celebrateBirthday": {
+      "type": "boolean",
+      "label": "生日当天自然提起",
+      "description": "开启后生日当天的提示词里会带一句「今天你过生日」，让 TA 在氛围合适时自然提到自己长大了一岁。"
+    },
+    "maxStagesInPrompt": {
+      "type": "number",
+      "label": "每轮最多注入几个成长阶段",
+      "description": "阶段太多时只带最近的 N 个（全部都在档案里留着）。默认 12 个，控制每轮 token 占用。"
+    },
+    "digestModel": {
+      "type": "string",
+      "label": "沉淀专用模型（可选）",
+      "description": "留空用当前选中的主模型。想省钱可填个便宜模型（只影响成长沉淀，不影响聊天）。"
+    },
+    "extraAnchor": {
+      "type": "string",
+      "label": "追加的人设锚点（可选）",
+      "description": "消化经历时会自动以「当前人设」为锚；这里可以再补几条绝不允许偏离的硬性要求（一行一条）。"
+    }
+  },
+  "prompt": null,
+  "entry": "index.js",
+  "hasScript": true
+}
