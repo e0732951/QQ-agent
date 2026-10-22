@@ -33,11 +33,11 @@ function normalizeInlineAt(text, atUserId, atName) {
  *   · 识别失败（插件内部已吞错并 log，这里再兜一层）
  * 这样保证关掉插件行为完全回退，且识别失败绝不打断消息入库。
  */
-async function transcribeVoice(record, onebot) {
+async function transcribeVoice(record, onebot, messageId) {
   try {
     const fn = skillManager.getCapabilityProviders('media.transcribe')[0]?.fn;
     if (!fn || !onebot) return null;
-    const r = await fn({ record, onebot });
+    const r = await fn({ record, onebot, messageId });
     const text = String(r?.text ?? '').trim();
     return r?.ok && text ? text : null;
   } catch {
@@ -419,7 +419,7 @@ export function forwardIdFromData(d) {
  * onebot: OneBot 客户端，仅语音转写需要（`media.transcribe` 取语音文件用）；
  *         不传则语音保持 `[语音]` 占位。
  */
-export async function segmentsToText(segments, { resolveReply = null, resolveAtName = null, includeReply = true, onebot = null, onAt = null } = {}) {
+export async function segmentsToText(segments, { resolveReply = null, resolveAtName = null, includeReply = true, onebot = null, onAt = null, messageId = null } = {}) {
   if (typeof segments === 'string') return sanitizeUserText(segments.trim());
   const out = [];
   for (const seg of segments ?? []) {
@@ -449,7 +449,7 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
         // 语音转文字走 `media.transcribe` 能力（speech-to-text 插件提供）。
         // 只在主消息路径转写（onebot 由调用方传入）：转发链里逐条跑 whisper
         // 会把 ingest 串行阻塞住，代价不划算，那里保持占位符。
-        const spoken = onebot ? await transcribeVoice(d, onebot) : null;
+        const spoken = onebot ? await transcribeVoice(d, onebot, messageId) : null;
         out.push(spoken ? `[语音转文字] ${spoken}` : '[语音]');
         break;
       }

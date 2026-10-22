@@ -1,0 +1,63 @@
+{
+  "id": "sovits-speech-to-text",
+  "name": "GPT-SoVITS 语音转文字",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "把别人发来的 QQ 语音，用 GPT-SoVITS 自带的中文 FunASR（Paraformer）转成文字，写进对话里给模型看。这是语音回复的反向：回复插件把文字念出去，这个插件把听到的语音读进来。识别服务没开时会在后台拉起来；失败就保持原来的「[语音]」占位，不会把消息弄丢。",
+  "author": "本机定制",
+  "entry": "index.js",
+  "permissions": [],
+  "enabledByDefault": true,
+  "capabilities": [
+    "media.transcribe"
+  ],
+  "requires": [],
+  "settings": {
+    "asrUrl": "http://127.0.0.1:9881",
+    "autoStartApi": true,
+    "pythonPath": "D:\\Program Files\\dafeiyu\\GPT-SoVITS-v2pro-20261006\\runtime\\python.exe",
+    "apiWorkDir": "D:\\Program Files\\dafeiyu\\GPT-SoVITS-v2pro-20261006",
+    "device": "auto",
+    "timeoutMs": 90000,
+    "apiStartTimeoutMs": 180000
+  },
+  "configSchema": {
+    "asrUrl": {
+      "type": "string",
+      "label": "识别服务地址",
+      "description": "本机 FunASR 服务，默认 http://127.0.0.1:9881。不要和语音回复的 9880 填成同一个端口。"
+    },
+    "autoStartApi": {
+      "type": "boolean",
+      "label": "服务没运行时自动启动",
+      "description": "默认开。收到语音时如果识别服务没在跑，插件会用下面的 python 在后台把它拉起来。"
+    },
+    "pythonPath": {
+      "type": "string",
+      "label": "python 解释器",
+      "description": "GPT-SoVITS 整合包里的 runtime\\python.exe。里面已经装好 FunASR。"
+    },
+    "apiWorkDir": {
+      "type": "string",
+      "label": "GPT-SoVITS 根目录",
+      "description": "识别模型在这个目录的 tools\\asr\\models 下面。留空则无法启动。"
+    },
+    "device": {
+      "type": "enum",
+      "values": ["auto", "cuda", "cpu"],
+      "label": "识别用哪块设备",
+      "description": "默认 auto：显存还剩 4GB 以上才用显卡，否则用 CPU，避免和语音回复抢显存。QQ 语音很短，CPU 也只要一两秒。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "单条识别超时（毫秒）",
+      "description": "默认 90000。超时这条就保持「[语音]」，不卡住后面的消息。"
+    },
+    "apiStartTimeoutMs": {
+      "type": "number",
+      "label": "等识别服务启动的最长时间（毫秒）",
+      "description": "默认 180000。第一次要加载 Paraformer，几十秒是正常的。"
+    }
+  }
+}

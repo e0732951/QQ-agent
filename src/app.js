@@ -846,8 +846,9 @@ export function createApp({ log = console.log } = {}) {
         resolveReply: (mid) => resolveReply(mid),
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : null,
         onAt: (m) => atMarks.push(m),
-        // 语音转写（`media.transcribe`）要用它去 get_record 取音频
-        onebot
+        // 语音转写要 message_id：QQ 的 fetch_ptt_text 只认消息 id，入库时在这里等结果。
+        onebot,
+        messageId: event.message_id
       });
     } else {
       text = String(event.raw_message ?? event.message ?? '').trim();
