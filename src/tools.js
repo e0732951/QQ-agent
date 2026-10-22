@@ -29,6 +29,16 @@ async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
   const safeUrl = await validateImageUrl(url);
   const { buffer, contentType } = await safeFetchBinary(safeUrl);
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
+  // 动图优先按时长抽帧（length-frame-reader）。插件没开或抽失败，再走下面原来的 GIF 路线。
+  const sampled = await sampleAnimatedFrames(buffer);
+  if (sampled) {
+    return {
+      dataUrl: '',
+      animatedFrames: sampled.frames,
+      frameTimes: sampled.times || [],
+      durationSec: sampled.durationSec || 0
+    };
+  }
   // GIF 在这里分岔（规则矩阵见 resolveGifRoute）：
   //   vision+video 都开 → 转 mp4 按 video 部件发（llm.js 自动切视频专用模型）；
   //   只开 vision      → GIF 按图片原样发（读不了的模型由 llm.js 的"图片被拒"
@@ -70,18 +80,53 @@ async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
 function getImagePartsOrVideo(text, results) {
   const parts = [{ type: 'text', text }];
   const gifAsImage = [];
+  const sampledNotes = [];
   for (const r of results) {
-    if (r?.gifVideo) {
+    if (Array.isArray(r?.animatedFrames) && r.animatedFrames.length) {
+      const sec = Number(r.durationSec) > 0 ? `约 ${Number(r.durationSec).toFixed(1)} 秒，` : '';
+      const times = Array.isArray(r.frameTimes) && r.frameTimes.length
+        ? `时间点 ${r.frameTimes.map((t) => `${Number(t).toFixed(1)}s`).join('、')}`
+        : '';
+      sampledNotes.push(`动图已按时长抽成 ${r.animatedFrames.length} 张静帧（${sec}${times}）。按先后顺序理解，帧与帧之间的过程看不到。`);
+      for (const url of r.animatedFrames) parts.push({ type: 'image_url', image_url: { url } });
+    } else if (r?.gifVideo) {
       parts.push({ type: 'video_url', video_url: { url: r.gifVideo.dataUrl } });
     } else {
       parts.push({ type: 'image_url', image_url: { url: r.dataUrl } });
       if (r?.isGif) gifAsImage.push(r);
     }
   }
+  if (sampledNotes.length) parts[0].text += `\n${sampledNotes.join('\n')}`;
   if (gifAsImage.length) {
     parts[0].text += `\n（其中 ${gifAsImage.length} 张是 GIF 动图，按原图发送：部分模型只能看到第一帧，读不了时会自动换成首帧重试）`;
   }
   return { content: parts, videoCount: parts.filter((p) => p.type === 'video_url').length };
+}
+
+/** GIF，或带动画标记的 WebP。静态图不进抽帧。 */
+function isAnimatedImage(buf) {
+  if (!buf || buf.length < 12) return false;
+  const gif = buf.toString('ascii', 0, 6);
+  if (gif === 'GIF87a' || gif === 'GIF89a') return true;
+  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WEBP') return false;
+  const at = buf.indexOf('VP8X');
+  return at >= 0 && buf.length > at + 8 && (buf[at + 8] & 0x02) !== 0;
+}
+
+/**
+ * 动图按时长抽成静帧。没有插件或抽帧失败时返回 null，调用方继续走原来的 GIF 路线。
+ */
+async function sampleAnimatedFrames(buffer) {
+  if (!isAnimatedImage(buffer)) return null;
+  try {
+    const fn = skillManager.getCapabilityProviders('image.animated-frames')[0]?.fn;
+    if (!fn) return null;
+    const r = await fn({ buffer });
+    if (r?.skip || !r?.ok || !Array.isArray(r.frames) || !r.frames.length) return null;
+    return r;
+  } catch {
+    return null;
+  }
 }
 
 function detectMime(buf) {
@@ -630,11 +675,14 @@ function registerAllTools() {
         }
         if (!results.length) return err(`图片获取失败：${failed.join('；')}`);
         const note = failed.length ? `（另有 ${failed.length} 张获取失败）` : '';
-        // GIF 动图可能被转成了视频部件（见 downloadImageAsDataUrl），文案里区分张数
+        // 动图可能已抽成静帧，GIF 也可能被转成视频部件，文案里分开数
+        const sampledCount = results.filter((r) => r?.animatedFrames?.length).length;
         const videoCount = results.filter((r) => r?.gifVideo).length;
-        const imageCount = results.length - videoCount;
+        const imageCount = results.length - videoCount - sampledCount;
+        const frameCount = results.reduce((n, r) => n + (r?.animatedFrames?.length || 0), 0);
         const what = [
           imageCount ? `${imageCount} 张图片` : '',
+          sampledCount ? `${sampledCount} 张动图（抽成 ${frameCount} 帧）` : '',
           videoCount ? `${videoCount} 段视频（由 GIF 动图转换，≤480px/≤24帧）` : ''
         ].filter(Boolean).join(' + ');
         const built = getImagePartsOrVideo(`消息 ${args.messageId} 的内容${note}：${what}。`, results);

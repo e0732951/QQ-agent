@@ -69,8 +69,7 @@ function settings() {
 function modelPaths(workDir) {
   return {
     asr: path.join(workDir, MODELS.asr),
-    vad: path.join(workDir, MODELS.vad),
-    punc: path.join(workDir, MODELS.punc)
+    vad: path.join(workDir, MODELS.vad)
   };
 }
 

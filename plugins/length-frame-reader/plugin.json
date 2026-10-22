@@ -1,0 +1,52 @@
+{
+  "id": "length-frame-reader",
+  "name": "按时长抽帧",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "看动图和视频时，按片长决定抽几帧静图给模型看：一两秒的表情抽 2～4 帧，十几秒抽 6～8 帧，更长的最多 12 帧，均匀铺开。视频走读取视频的抽帧路线；GIF 和动态 WebP 在看图时直接换成这些静帧，不再整段原样塞给模型。",
+  "author": "本机定制",
+  "entry": "index.js",
+  "permissions": [],
+  "enabledByDefault": true,
+  "capabilities": [
+    "video.frames",
+    "video.frames.available",
+    "image.animated-frames"
+  ],
+  "requires": [],
+  "settings": {
+    "ffmpegDir": "D:\\modules\\ffmpeg-2026-06-10-git-b29bdd3715-essentials_build\\bin",
+    "maxFrames": 12,
+    "maxEdge": 480,
+    "jpegQuality": 5,
+    "timeoutMs": 60000
+  },
+  "configSchema": {
+    "ffmpegDir": {
+      "type": "string",
+      "label": "ffmpeg 所在目录",
+      "description": "填 ffmpeg.exe 和 ffprobe.exe 所在的目录。留空则用系统 PATH 里的 ffmpeg。"
+    },
+    "maxFrames": {
+      "type": "number",
+      "label": "最多抽几帧",
+      "description": "默认 12。片长再长也不会超过这个数，避免把视觉 token 打满。"
+    },
+    "maxEdge": {
+      "type": "number",
+      "label": "画面最长边（像素）",
+      "description": "默认 480。小图不会被放大。"
+    },
+    "jpegQuality": {
+      "type": "number",
+      "label": "JPEG 质量档（2～10，越小越清晰）",
+      "description": "ffmpeg 的 -q:v。默认 5，够看清表情和字幕。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "单次抽帧超时（毫秒）",
+      "description": "默认 60000。超时就放弃这次抽帧，视频退回只给元信息，动图退回原来的发送方式。"
+    }
+  }
+}
