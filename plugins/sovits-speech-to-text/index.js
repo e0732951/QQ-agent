@@ -266,21 +266,61 @@ async function savePayload(data, fallbackExt = 'wav') {
   return '';
 }
 
-async function materialize(record, onebot) {
-  const direct = await savePayload(record, 'bin');
-  if (direct && fs.existsSync(direct) && fs.statSync(direct).size > 64) return { file: direct, owned: direct.startsWith(WORK_DIR) };
+function audioKind(file) {
+  let buf;
+  try {
+    const fd = fs.openSync(file, 'r');
+    buf = Buffer.alloc(16);
+    fs.readSync(fd, buf, 0, 16, 0);
+    fs.closeSync(fd);
+  } catch {
+    return '';
+  }
+  const head = buf.toString('latin1');
+  if (head.startsWith('RIFF')) return 'wav';
+  if (head.includes('#!SILK')) return 'silk';
+  if (head.startsWith('#!AMR')) return 'amr';
+  if (head.startsWith('OggS')) return 'ogg';
+  if (head.startsWith('fLaC')) return 'flac';
+  if (head.startsWith('ID3') || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)) return 'mp3';
+  if (buf.subarray(4, 8).toString('latin1') === 'ftyp') return 'm4a';
+  return 'unknown';
+}
 
+/** FunASR / ffmpeg 能直接读的格式。QQ 的 .amr 链接经常是 SILK，不在此列。 */
+function isDecodable(file) {
+  return ['wav', 'mp3', 'ogg', 'flac', 'amr', 'm4a'].includes(audioKind(file));
+}
+
+function dropOwned(file) {
+  if (file && file.startsWith(WORK_DIR)) {
+    try { fs.unlinkSync(file); } catch { /* 留给下次 */ }
+  }
+}
+
+async function materialize(record, onebot) {
+  // 消息段里的 url 往往是 SILK（文件名却叫 .amr），ffmpeg 解不开。
+  // 协议端的 get_record(out_format=wav) 会转成真正的 wav，优先用它。
   const id = String(record?.file || record?.file_id || '').trim();
-  if (onebot && id && typeof onebot.call === 'function') {
-    const data = await onebot.call('get_record', { file: id, file_id: id, out_format: 'wav' }, 30000);
-    const saved = await savePayload(data, 'wav');
-    if (saved) return { file: saved, owned: saved.startsWith(WORK_DIR) };
+  const fileId = id && !id.startsWith('base64://') && !/^[A-Za-z0-9+/=\s]{256,}$/.test(id);
+  if (onebot && fileId && typeof onebot.call === 'function') {
+    try {
+      const data = await onebot.call('get_record', { file: id, file_id: id, out_format: 'wav' }, 30000);
+      const saved = await savePayload(data, 'wav');
+      if (saved && isDecodable(saved)) return { file: saved, owned: saved.startsWith(WORK_DIR) };
+      dropOwned(saved);
+    } catch (error) {
+      rtLog('取语音', errText(error));
+    }
   }
-  const url = String(record?.url || '');
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    const saved = await downloadUrl(url);
-    return { file: saved, owned: true };
+
+  const direct = await savePayload(record, 'bin');
+  if (direct && isDecodable(direct)) return { file: direct, owned: direct.startsWith(WORK_DIR) };
+  if (direct && audioKind(direct) === 'silk') {
+    dropOwned(direct);
+    throw new Error('语音是 SILK，协议端没有转成 wav');
   }
+  if (direct) return { file: direct, owned: direct.startsWith(WORK_DIR) };
   return { file: '', owned: false };
 }
 

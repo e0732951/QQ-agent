@@ -3,7 +3,8 @@
 // 按时长抽帧，给模型看动图和视频。
 //   · video.frames / video.frames.available：src/video-reader.js 在「抽帧」路线上调用
 //   · image.animated-frames：看图工具把 GIF / 动态 WebP 换成一组静帧
-// 帧数只跟片长有关，调用方如果指定了 count 就按它抽（仍受上限约束）。
+// 抽多少帧由「抽帧频率」和片长决定，调用方如果指定了 count 就按它抽（仍受上限约束）。
+// 画面不超过 maxP（默认 1080p）时保持原尺寸。
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,27 +20,38 @@ function settings() {
     const n = Number(c[k]);
     return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : d;
   };
+  const fpsRaw = Number(c.sampleFps);
+  const sampleFps = Number.isFinite(fpsRaw) ? Math.min(8, Math.max(0.1, Math.round(fpsRaw * 1000) / 1000)) : 2;
   return {
     ffmpegDir: String(c.ffmpegDir ?? '').trim(),
-    maxFrames: num('maxFrames', 12, 1, 16),
-    maxEdge: num('maxEdge', 480, 160, 1280),
-    jpegQuality: num('jpegQuality', 5, 2, 12),
+    sampleFps,
+    maxFrames: num('maxFrames', 36, 1, 60),
+    maxP: num('maxP', 1080, 240, 2160),
+    jpegQuality: num('jpegQuality', 2, 1, 8),
     timeoutMs: num('timeoutMs', 60000, 5000, 180000)
   };
 }
 
-/** 片长 → 帧数。短表情少抽，长视频均匀多抽，到顶为止。 */
-export function framesForDuration(durationSec, maxFrames = 12) {
-  const cap = Math.max(1, Math.min(16, Number(maxFrames) || 12));
+/**
+ * 按抽帧频率决定张数。
+ * 频率 × 时长没超过上限时，按这个频率从片头往后抽。
+ * 超过上限时 spread 为 true：改为铺满整段，避免长视频只剩下开头。
+ */
+export function framesForRate(durationSec, sampleFps = 2, maxFrames = 36) {
+  const cap = Math.max(1, Math.min(60, Math.round(Number(maxFrames) || 36)));
+  const rate = Math.min(8, Math.max(0.1, Number(sampleFps) || 2));
   const d = Number(durationSec);
-  if (!Number.isFinite(d) || d <= 0) return Math.min(4, cap);
-  let n = 2;
-  if (d > 1.2) n = 4;
-  if (d > 3) n = 6;
-  if (d > 8) n = 8;
-  if (d > 20) n = 10;
-  if (d > 60) n = 12;
-  return Math.min(n, cap);
+  if (!Number.isFinite(d) || d <= 0) return { count: Math.min(4, cap), rate, spread: false };
+  const raw = Math.max(1, Math.round(d * rate));
+  return { count: Math.min(cap, raw), rate, spread: raw > cap };
+}
+
+/** 1080p → 横屏长边 1920、竖屏宽边 1080。比上限小的不放大。 */
+export function fitScale(maxP) {
+  const p = Math.max(240, Math.min(2160, Math.round(Number(maxP) || 1080)));
+  const longCap = Math.round(p * 16 / 9 / 2) * 2;
+  const shortCap = Math.round(p / 2) * 2;
+  return `scale='trunc(min(if(gte(iw,ih),${longCap},${shortCap}),iw)/2)*2':-2:flags=lanczos`;
 }
 
 function bin(name) {
@@ -132,8 +144,10 @@ async function extractFile(file, { count, durationSec } = {}) {
   const s = settings();
   if (!file || !fs.existsSync(file)) return { ok: false, error: '文件不存在' };
   const duration = Number(durationSec) > 0 ? Number(durationSec) : await probeDuration(file);
-  const n = count > 0 ? Math.min(s.maxFrames, Math.max(1, Math.round(Number(count)))) : framesForDuration(duration, s.maxFrames);
-  const fps = duration > 0.05 ? (n / duration) : 2;
+  const planned = framesForRate(duration, s.sampleFps, s.maxFrames);
+  const n = count > 0 ? Math.min(s.maxFrames, Math.max(1, Math.round(Number(count)))) : planned.count;
+  // 指定了张数，或张数被上限截断时，均匀铺满整段；否则严格按设定频率从片头抽。
+  const fps = duration > 0.05 && (count > 0 || planned.spread) ? (n / duration) : planned.rate;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qqa-frames-'));
   const pattern = path.join(dir, 'f_%02d.jpg');
   const loopOnce = /\.(gif|webp)$/i.test(file);
@@ -142,7 +156,7 @@ async function extractFile(file, { count, durationSec } = {}) {
       '-y',
       ...(loopOnce ? ['-ignore_loop', '1'] : []),
       '-i', file,
-      '-vf', `fps=${fps.toFixed(4)},scale='min(${s.maxEdge},iw)':-2`,
+      '-vf', `fps=${fps.toFixed(4)},${fitScale(s.maxP)}`,
       '-frames:v', String(n),
       '-q:v', String(s.jpegQuality),
       pattern
@@ -189,7 +203,7 @@ export function promptSections() {
     id: 'length-frame-reader',
     title: '动图和视频',
     priority: 34,
-    content: 'GIF、动态 WebP 和视频会按时长抽成几张静帧给你看，时间点写在说明里。把它们按先后顺序理解成一段动作，不要说自己看不到动图或视频。帧与帧之间的过程你看不到。'
+    content: 'GIF、动态 WebP 和视频会按设定频率抽成几张静帧给你看，时间点写在说明里。画面是原清晰度（超过上限才会缩小）。把它们按先后顺序理解成一段动作，不要说自己看不到动图或视频。帧与帧之间的过程你看不到。'
   }];
 }
 
@@ -207,4 +221,4 @@ export const providers = {
   }
 };
 
-export const internals = { framesForDuration, extractFile, isAnimatedBuffer };
+export const internals = { framesForRate, fitScale, extractFile, isAnimatedBuffer };

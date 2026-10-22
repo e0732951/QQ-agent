@@ -1,10 +1,10 @@
 {
   "id": "length-frame-reader",
   "name": "按时长抽帧",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "apiVersion": 1,
   "category": "media",
-  "description": "看动图和视频时，按片长决定抽几帧静图给模型看：一两秒的表情抽 2～4 帧，十几秒抽 6～8 帧，更长的最多 12 帧，均匀铺开。视频走读取视频的抽帧路线；GIF 和动态 WebP 在看图时直接换成这些静帧，不再整段原样塞给模型。",
+  "description": "看动图和视频时按设定的频率抽静帧给模型看。画面保持原清晰度，只有超过上限（默认 1080p，即横屏 1920×1080、竖屏 1080×1920）才缩小，小图不放大。视频走读取视频的抽帧路线；GIF 和动态 WebP 在看图时直接换成这些静帧。",
   "author": "本机定制",
   "entry": "index.js",
   "permissions": [],
@@ -17,9 +17,10 @@
   "requires": [],
   "settings": {
     "ffmpegDir": "D:\\modules\\ffmpeg-2026-06-10-git-b29bdd3715-essentials_build\\bin",
-    "maxFrames": 12,
-    "maxEdge": 480,
-    "jpegQuality": 5,
+    "sampleFps": 2,
+    "maxFrames": 36,
+    "maxP": 1080,
+    "jpegQuality": 2,
     "timeoutMs": 60000
   },
   "configSchema": {
@@ -28,20 +29,25 @@
       "label": "ffmpeg 所在目录",
       "description": "填 ffmpeg.exe 和 ffprobe.exe 所在的目录。留空则用系统 PATH 里的 ffmpeg。"
     },
+    "sampleFps": {
+      "type": "number",
+      "label": "抽帧频率（帧/秒）",
+      "description": "默认 2，即每 0.5 秒一帧。1 是每秒 1 帧，0.5 是每 2 秒 1 帧。短于一帧间隔的片子至少抽 1 帧。算出来的张数如果超过「最多抽几帧」，就改为在整段里均匀抽到这个上限，避免只看到开头。"
+    },
     "maxFrames": {
       "type": "number",
       "label": "最多抽几帧",
-      "description": "默认 12。片长再长也不会超过这个数，避免把视觉 token 打满。"
+      "description": "默认 36。频率再高、片子再长也不会超过这个数。"
     },
-    "maxEdge": {
+    "maxP": {
       "type": "number",
-      "label": "画面最长边（像素）",
-      "description": "默认 480。小图不会被放大。"
+      "label": "清晰度上限（p）",
+      "description": "默认 1080。横屏不超过 1920×1080，竖屏不超过 1080×1920。没超过的保持原尺寸，不放大。"
     },
     "jpegQuality": {
       "type": "number",
-      "label": "JPEG 质量档（2～10，越小越清晰）",
-      "description": "ffmpeg 的 -q:v。默认 5，够看清表情和字幕。"
+      "label": "JPEG 质量档（1～8，越小越清晰）",
+      "description": "ffmpeg 的 -q:v。默认 2，接近原画。数字越大文件越小、也越糊。"
     },
     "timeoutMs": {
       "type": "number",
