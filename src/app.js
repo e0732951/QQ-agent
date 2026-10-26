@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
-import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
+import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, fetchForwardNodes } from './onebot.js';
 import { isAtMe } from './prompt.js';
 import { ChatStore } from './store.js';
 import { MemoryStore } from './memory.js';
@@ -855,15 +855,14 @@ export function createApp({ log = console.log } = {}) {
     }
 
     // 合并转发：占位符 → 展开真实内容（模型要读懂、看懂转发的聊天记录）
-    // 实测结论（2026-09-05，SnowLuma/NapCat）：get_forward_msg 只认 message_id；
-    // res_id（转发卡片里那个 id）会过期，报 "payload is empty"。
+    // message_id 和卡片 id 两条都试（见 fetchForwardNodes）。
     // 媒体里的 url 此时是新鲜的，一并收进 media（取图/金句都能用）。
     // 展开失败时占位符留在存档里，模型可用 read_forward 工具稍后重试。
     if (segments && (text.includes('[合并转发') || text.includes('[转发消息')) && event.message_id != null) {
       try {
-        const r = await onebot.call('get_forward_msg', { message_id: Number(event.message_id) });
-        const nodes = Array.isArray(r?.messages) ? r.messages : (Array.isArray(r?.data?.messages) ? r.data.messages : []);
-        const ex = await expandForwardNodes(nodes);
+        const forwardId = media.find((m) => m.kind === 'forward')?.file || '';
+        const nodes = await fetchForwardNodes(onebot, { messageId: event.message_id, forwardId });
+        const ex = await expandForwardNodes(nodes, { onebot });
         if (ex && ex.text) {
           text = ex.text;
           if (ex.media?.length) media.push(...ex.media);

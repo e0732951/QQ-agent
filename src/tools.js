@@ -12,7 +12,7 @@ import { formatStickerList } from './stickers.js';
 import { skillManager } from './skills/manager.js';
 import { validateImageUrl, safeFetchBinary, browseLockState, checkBrowseLock } from './safe-fetch.js';
 import { webSearch, webFetch } from './web-search.js';
-import { expandForwardNodes } from './onebot.js';
+import { expandForwardNodes, fetchForwardNodes } from './onebot.js';
 import { registerTool, listTools } from './tool-registry.js';
 import { holidayOn, upcomingHoliday } from './holidays.js';
 import { compressImage } from './image-compress.js';
@@ -562,9 +562,9 @@ function registerAllTools() {
         if (String(entry.text || '').startsWith('[合并转发 共')) {
           return ok({ messageId: entry.mid, text: entry.text, note: '该转发已展开（读的是存档）' });
         }
-        const r = await ctx.onebot.call('get_forward_msg', { message_id: Number(entry.mid) });
-        const nodes = Array.isArray(r?.messages) ? r.messages : [];
-        const ex = await expandForwardNodes(nodes);
+        const forwardId = (entry.media || []).find((m) => m.kind === 'forward')?.file || '';
+        const nodes = await fetchForwardNodes(ctx.onebot, { messageId: entry.mid, forwardId });
+        const ex = await expandForwardNodes(nodes, { onebot: ctx.onebot });
         if (!ex || !ex.text) return err('转发内容为空或已被 QQ 服务端丢弃（发送时间太久）');
         // 写回存档：一次展开，永久升级这条记录（模型/存档页/金句墙都受益）
         ctx.store.updateByMid(ctx.chatKey, entry.mid, { text: ex.text, appendMedia: ex.media || [] });

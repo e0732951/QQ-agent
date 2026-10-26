@@ -478,8 +478,8 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
       }
       case 'json': out.push('[卡片消息]'); break;
       case 'forward': {
-        // 不带 res_id：那个 id 会过期（payload is empty），打出来只会误导模型拿它当参数。
-        // 模型要看内容用 read_forward 工具 + 消息前的 #数字。
+        // 不把卡片 id 写进正文：那串 id 又长又会过期，模型拿去当参数必失败。
+        // 展开走 fetchForwardNodes，用消息前的 #数字。
         out.push('[合并转发聊天记录]');
         break;
       }
@@ -502,54 +502,186 @@ export function extractMediaFromSegments(segments) {
       media.push({ kind: 'video', file: String(d.file ?? ''), url: String(d.url ?? ''), path: String(d.path ?? '') });
     } else if (seg.type === 'face') {
       media.push({ kind: 'face', faceId: String(d.id ?? '') });
+    } else if (seg.type === 'forward') {
+      const id = String(d.id ?? d.res_id ?? '').trim();
+      if (id) media.push({ kind: 'forward', file: id });
     }
   }
   return media;
 }
 
+function nodesOf(data) {
+  if (Array.isArray(data?.messages)) return data.messages;
+  if (Array.isArray(data?.data?.messages)) return data.data.messages;
+  return [];
+}
+
+function cqForwardId(text) {
+  const matched = String(text || '').match(/\[CQ:forward,([^\]]+)\]/i);
+  if (!matched) return '';
+  const id = matched[1].match(/(?:^|,)id=([^,\]]*)/);
+  if (!id) return '';
+  return id[1]
+    .replace(/&#44;/g, ',')
+    .replace(/&#91;/g, '[')
+    .replace(/&#93;/g, ']')
+    .replace(/&amp;/g, '&')
+    .trim();
+}
+
+function forwardIdOf(msg) {
+  const fromRaw = cqForwardId(msg?.raw_message);
+  if (fromRaw) return fromRaw;
+  const segs = Array.isArray(msg?.message) ? msg.message : [];
+  for (const seg of segs) {
+    if (seg?.type !== 'forward') continue;
+    const id = String(seg.data?.id ?? seg.data?.res_id ?? '').trim() || cqForwardId(seg.data?.content);
+    if (id) return id;
+  }
+  return '';
+}
+
+function decodeXml(text) {
+  return String(text || '')
+    .replace(/&#10;/g, '\n')
+    .replace(/&#13;/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/** QQ「聊天记录」卡片（serviceID 35）正文在 title 里，协议端不再给全文。 */
+function titlesFromMultiMsg(xml) {
+  return [...String(xml || '').matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/gi)]
+    .map((m) => decodeXml(m[1]).replace(/\s+/g, ' ').trim())
+    .filter((t) => t && t !== '群聊的聊天记录' && t !== '聊天记录');
+}
+
 /**
- * 展开合并转发节点为可读文本（纯函数，便于测试）。
+ * 取出合并转发的节点数组。
  *
- * 背景：OneBot 事件里的 forward 段只有一个 res_id 占位符，
- * 需要 get_forward_msg 拿回节点数组（本函数处理的就是这个数组）。
- * 实测 NapCat：{ message_id } 可用；res_id 会过期（payload is empty），别依赖。
- *
- * 规则：
- *   - 每个节点一行「昵称: 内容」，内容复用 segmentsToText（@/图片/表情等占位一致）
- *   - 嵌套转发不再展开（深度 1 封顶，套娃截断）
- *   - 封顶：maxNodes 条 / maxChars 字符，超出注明"还有 N 条未展开"
- *   - 节点里的图片段同时提取到 media（url 新鲜，可用于取图/金句）
- *
- * @param {Array} nodes get_forward_msg 返回的 messages 数组
- * @returns {{ text: string, media: Array } | null} 无可用节点返回 null
+ * SnowLuma 1.14 上只传 message_id 会报 "payload is empty"；
+ * 转发卡片里的 id 才能下到内容。更早的版本相反：id 过期、message_id 可用。
+ * 所以两条都试。存档里没有卡片 id 时，用 get_msg 现取一次再试。
  */
-export async function expandForwardNodes(nodes, { maxNodes = 30, maxChars = 3000 } = {}) {
+export async function fetchForwardNodes(onebot, { messageId = null, forwardId = '' } = {}) {
+  if (!onebot || typeof onebot.call !== 'function') return [];
+  const errors = [];
+  const attempt = async (params) => {
+    try {
+      const nodes = nodesOf(await onebot.call('get_forward_msg', params));
+      return nodes.length ? nodes : null;
+    } catch (error) {
+      errors.push(error);
+      return null;
+    }
+  };
+
+  let id = String(forwardId || '').trim();
+  if (id) {
+    const nodes = await attempt({ id });
+    if (nodes) return nodes;
+  }
+  const hasMid = messageId != null && String(messageId) !== '' && Number.isFinite(Number(messageId));
+  if (hasMid) {
+    const nodes = await attempt({ message_id: Number(messageId) });
+    if (nodes) return nodes;
+    try {
+      const fresh = forwardIdOf(await onebot.call('get_msg', { message_id: Number(messageId) }));
+      if (fresh && fresh !== id) {
+        const again = await attempt({ id: fresh });
+        if (again) return again;
+      }
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length) throw errors[errors.length - 1];
+  return [];
+}
+
+function senderLabel(node) {
+  const rawName = String(node?.sender?.card || node?.sender?.nickname || node?.user_id || '?');
+  const nid = String(node?.sender?.user_id ?? node?.user_id ?? '').trim();
+  return nid && nid !== rawName ? `${rawName}(QQ:${nid})` : rawName;
+}
+
+function pushBlock(lines, name, body) {
+  const parts = String(body || '').split('\n').map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return;
+  const oneLine = parts.length === 1 && !parts[0].startsWith('[合并转发') && !parts[0].startsWith('[聊天记录]');
+  if (oneLine) lines.push(`${name}: ${parts[0].slice(0, 400)}`);
+  else lines.push(`${name}:`, ...parts.map((s) => `  ${s.slice(0, 400)}`));
+}
+
+/**
+ * 展开合并转发节点为可读文本。
+ *
+ * 套娃转发会继续用卡片 id 往下打开（最多 4 层）。
+ * 「聊天记录」XML 卡片协议端只给预览，把 title 里的几行抽出来。
+ * 封顶：maxNodes 行 / maxChars 字符。
+ *
+ * @returns {{ text: string, media: Array } | null}
+ */
+export async function expandForwardNodes(nodes, opts = {}) {
   if (!Array.isArray(nodes) || !nodes.length) return null;
+  const maxNodes = opts.maxNodes ?? 40;
+  const maxChars = opts.maxChars ?? 4000;
+  const onebot = opts.onebot || null;
+  const depth = opts.depth ?? 0;
+  const maxDepth = opts.maxDepth ?? 4;
+  const seen = opts.seen || new Set();
   const lines = [];
   const media = [];
   let truncated = 0;
 
+  const nestedText = async (fid) => {
+    if (!fid || !onebot || depth >= maxDepth || seen.has(fid)) return '[合并转发]';
+    seen.add(fid);
+    try {
+      const inner = await fetchForwardNodes(onebot, { forwardId: fid });
+      const ex = await expandForwardNodes(inner, { maxNodes, maxChars, onebot, depth: depth + 1, maxDepth, seen });
+      if (ex?.media?.length) media.push(...ex.media);
+      return ex?.text || '[合并转发]';
+    } catch {
+      return '[合并转发]';
+    }
+  };
+
+  const segmentText = async (nm) => {
+    if (typeof nm === 'string') {
+      const fid = cqForwardId(nm);
+      if (fid) return nestedText(fid);
+      return nm.replace(/\[CQ:[^\]]*\]/g, '').trim();
+    }
+    if (!Array.isArray(nm)) return '';
+    const chunks = [];
+    for (const seg of nm) {
+      if (!seg || typeof seg !== 'object') continue;
+      if (seg.type === 'forward') {
+        const fid = String(seg.data?.id ?? seg.data?.res_id ?? '').trim() || cqForwardId(seg.data?.content);
+        chunks.push(await nestedText(fid));
+        continue;
+      }
+      if (seg.type === 'xml' || seg.type === 'json') {
+        const xml = String(seg.data?.data || seg.data?.xml || seg.data?.content || '');
+        const titles = titlesFromMultiMsg(xml);
+        chunks.push(titles.length ? `[聊天记录]\n${titles.join('\n')}` : '[聊天记录]');
+        continue;
+      }
+      chunks.push(await segmentsToText([seg], {}));
+      media.push(...extractMediaFromSegments([seg]));
+    }
+    return chunks.filter(Boolean).join('\n');
+  };
+
   for (let i = 0; i < nodes.length; i++) {
     if (lines.length >= maxNodes) { truncated = nodes.length - i; break; }
-    const n = nodes[i] || {};
-    // 发言人带 QQ 号（与主历史同口径）：转发记录里的人也要能被稳定识别
-    const rawName = String(n.sender?.card || n.sender?.nickname || n.user_id || '?');
-    const nid = String(n.sender?.user_id ?? n.user_id ?? '').trim();
-    const name = nid && nid !== rawName ? `${rawName}(QQ:${nid})` : rawName;
-    const nm = n.message ?? n.content;
-    let body = '';
-    if (typeof nm === 'string') {
-      // 字符串形态一般是 CQ 码原文，剥掉 [CQ:xxx] 段保留纯文本
-      body = nm.replace(/\[CQ:[^\]]*\]/g, '').trim();
-    } else if (Array.isArray(nm)) {
-      // 嵌套 forward 段清空 data → segmentsToText 输出 [转发消息] 占位（深度 1 封顶）
-      const segs = nm.map((s) => (s?.type === 'forward' ? { type: 'forward', data: {} } : s));
-      body = await segmentsToText(segs, {});
-      media.push(...extractMediaFromSegments(segs));
-    }
-    body = body.replace(/\s+/g, ' ').trim().slice(0, 200);
+    const body = await segmentText(nodes[i]?.message ?? nodes[i]?.content);
     if (!body) continue;
-    lines.push(`${name}: ${body}`);
+    pushBlock(lines, senderLabel(nodes[i]), body);
     if (lines.join('\n').length > maxChars) { truncated = nodes.length - i - 1; break; }
   }
 
