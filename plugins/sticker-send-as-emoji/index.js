@@ -180,16 +180,80 @@ function uninstall() {
   origSendSegments = null;
 }
 
+const pendingStickers = new Map();
+
+function styleWordList() {
+  return String(settings().styleWords ?? settings().styleKeywords ?? '')
+    .split(/[\s,，、;；]+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length > 0);
+}
+
+function stickerTargets(entries) {
+  const out = [];
+  for (const message of entries || []) {
+    if (!message || message.self) continue;
+    const mid = message.mid;
+    if (mid === undefined || mid === null || String(mid) === '') continue;
+    for (const media of message.media || []) {
+      if (media?.kind !== 'image' || !(media.url || media.file)) continue;
+      const label = `${media.summary || ''} ${message.text || ''}`;
+      if (!/动画表情|動畫表情/.test(label)) continue;
+      out.push({ mid, url: media.url || '', file: media.file || '' });
+      break;
+    }
+  }
+  return out;
+}
+
+function responseText(response) {
+  const message = response?.message || response || {};
+  const parts = [message.content, message.reasoning_content];
+  for (const call of message.tool_calls || []) {
+    parts.push(call?.function?.name, call?.function?.arguments);
+  }
+  return parts.filter((part) => typeof part === 'string').join('\n');
+}
+
+function rememberStickers(ctx) {
+  const id = String(ctx?.sessionId || '');
+  if (!id || !settings().enabled || !settings().groupCollect) return [];
+  const targets = stickerTargets(ctx.triggerEntries);
+  pendingStickers.set(id, { at: Date.now(), targets });
+  if (pendingStickers.size > 30) {
+    const oldest = [...pendingStickers.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) pendingStickers.delete(oldest[0]);
+  }
+  return targets;
+}
+
+function collectMatched(ctx) {
+  const id = String(ctx?.sessionId || '');
+  const found = id ? pendingStickers.get(id) : null;
+  const targets = found?.targets || [];
+  if (!targets.length || typeof ctx?.stickers?.collect !== 'function') return;
+  const words = styleWordList();
+  const hit = words.filter((word) => responseText(ctx.response).includes(word));
+  if (!hit.length) return;
+  pendingStickers.delete(id);
+  const note = `群内搜集：${hit.slice(0, 3).join(' ')}`.slice(0, 40);
+  for (const target of targets) {
+    void ctx.stickers.collect(target.mid, { url: target.url, file: target.file, note })
+      .then(() => { try { log(`已按关键词收藏群表情 #${target.mid}`); } catch { /* ignore */ } })
+      .catch((error) => { try { warn(`关键词收藏失败 #${target.mid}：${error?.message ?? error}`); } catch { /* ignore */ } });
+  }
+}
+
 function groupCollectSections() {
   const current = settings();
   if (!current.enabled || !current.groupCollect) return [];
-  const words = String(current.styleWords ?? current.styleKeywords ?? '').trim();
-  const taste = words
-    ? `优先收藏符合这些风格的：${words}。`
+  const words = styleWordList();
+  const taste = words.length
+    ? `关键词是收录条件：${words.join('、')}。看过的表情包只要对得上其中一个，本轮结束前必须调用 collect_sticker。只在回复里提到、不调用收藏，不算收录。`
     : '没有填写风格关键词，按你自己的喜好决定收不收。';
   return [{
     id: 'sticker-group-collect',
-    content: `群内表情搜集已开。看到别人发的表情包时，${taste}喜欢就调用 collect_sticker，messageId 填那条消息的 #数字，note 用一句话写这张图在说什么。截图、照片、广告图不要收，已经在表情库里的不要重复收。`
+    content: `群内表情搜集已开。${taste}messageId 填那条消息的 #数字，note 用一句话写这张图在说什么。截图、照片、广告图不要收，已经在表情库里的不要重复收。`
   }];
 }
 
@@ -199,8 +263,24 @@ export function promptSections(ctx) {
 }
 
 export const hooks = {
-  'before-llm-messages'(ctx) { return meme.hooks?.['before-llm-messages']?.(ctx); },
-  'after-response'(ctx) { return meme.hooks?.['after-response']?.(ctx); }
+  'before-context'(ctx) { rememberStickers(ctx); },
+  'before-llm-messages'(ctx) {
+    const words = styleWordList();
+    const targets = pendingStickers.get(String(ctx?.sessionId || ''))?.targets || [];
+    if (settings().enabled && settings().groupCollect && words.length && targets.length && Array.isArray(ctx?.messages)) {
+      const ids = targets.map((item) => `#${item.mid}`).join('、');
+      ctx.messages.push({
+        role: 'user',
+        content: `【表情包搜集】别人刚发的表情：${ids}。关键词：${words.join('、')}。看完后只要对得上其中一个，就调用 collect_sticker，messageId 用对应的 #数字，note 写这张图在说什么。只回复、不收藏，不算收录。照片和截图不要收。`
+      });
+    }
+    return meme.hooks?.['before-llm-messages']?.(ctx);
+  },
+  'after-response'(ctx) {
+    const out = meme.hooks?.['after-response']?.(ctx);
+    try { collectMatched(ctx); } catch { /* 收藏失败不影响回复 */ }
+    return out;
+  }
 };
 
 export async function setup(api) {

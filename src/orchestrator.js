@@ -766,7 +766,8 @@ export class Orchestrator {
       visionEnabled,
       searchEnabled,
       proactive,
-      sessionId: session.id
+      sessionId: session.id,
+      stickers: this.stickers
     };
 
     // Skill 生命周期：提示词组装之前先跑 before-context。
