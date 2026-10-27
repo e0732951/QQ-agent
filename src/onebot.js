@@ -274,25 +274,38 @@ export class OneBotClient {
     // 而超时抛的是 `fetch failed`（真因在 cause 里），用户完全看不懂。
     // 发送是不幂等但"重试代价低"的操作，宁可多等，也不要误判失败。
     const limit = timeoutMs ?? (SLOW_ACTION.test(action) ? SEND_TIMEOUT_MS : CALL_TIMEOUT_MS);
+    // 启动时序：本程序先起来，SnowLuma 要等 QQ 登录才监听 3000，中间大约几十秒。
+    // 这期间发出的消息会 ECONNREFUSED。连接被拒表示请求没到协议端，等端口起来再发不会重复。
+    const refusedDeadline = Date.now() + 40000;
+    let refusedTries = 0;
     let res;
-    try {
-      res = await fetch(`${this.httpUrl}/${action}`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(this.httpToken ? { authorization: `Bearer ${this.httpToken}` } : {})
-        },
-        body: JSON.stringify(params),
-        signal: AbortSignal.timeout(limit)
-      });
-    } catch (error) {
-      // fetch 只在网络层失败时抛，且 message 恒为 "fetch failed" —— 丢给上层
-      // 只会得到一句没法排查的话。这里把 cause 链挖出来再抛。
-      const cause = describeCause(error);
-      const aborted = /timeout|abort/i.test(cause) || error?.name === 'TimeoutError' || error?.name === 'AbortError';
-      throw new Error(aborted
-        ? `OneBot ${action} 超时（${Math.round(limit / 1000)} 秒未完成）：${cause}`
-        : `OneBot ${action} 请求失败：${cause}`);
+    for (;;) {
+      try {
+        res = await fetch(`${this.httpUrl}/${action}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(this.httpToken ? { authorization: `Bearer ${this.httpToken}` } : {})
+          },
+          body: JSON.stringify(params),
+          signal: AbortSignal.timeout(limit)
+        });
+        break;
+      } catch (error) {
+        // fetch 只在网络层失败时抛，且 message 恒为 "fetch failed" —— 丢给上层
+        // 只会得到一句没法排查的话。这里把 cause 链挖出来再抛。
+        const cause = describeCause(error);
+        const aborted = /timeout|abort/i.test(cause) || error?.name === 'TimeoutError' || error?.name === 'AbortError';
+        const refused = !aborted && /ECONNREFUSED/.test(cause) && Date.now() < refusedDeadline;
+        if (!refused) {
+          throw new Error(aborted
+            ? `OneBot ${action} 超时（${Math.round(limit / 1000)} 秒未完成）：${cause}`
+            : `OneBot ${action} 请求失败：${cause}`);
+        }
+        refusedTries += 1;
+        if (refusedTries === 1) console.warn(`[onebot] ${action} 连接被拒，等待 OneBot HTTP 起来后重试`);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
     }
     if (!res.ok) {
       const hint = res.status === 426
@@ -619,19 +632,19 @@ function pushBlock(lines, name, body) {
 /**
  * 展开合并转发节点为可读文本。
  *
- * 套娃转发会继续用卡片 id 往下打开（最多 4 层）。
+ * 套娃转发会继续用卡片 id 往下打开（最多 8 层）。
  * 「聊天记录」XML 卡片协议端只给预览，把 title 里的几行抽出来。
- * 封顶：maxNodes 行 / maxChars 字符。
+ * 封顶：每一层最多 maxNodes 条消息 / maxChars 字符。嵌套正文不占用外层条数。
  *
  * @returns {{ text: string, media: Array } | null}
  */
 export async function expandForwardNodes(nodes, opts = {}) {
   if (!Array.isArray(nodes) || !nodes.length) return null;
-  const maxNodes = opts.maxNodes ?? 40;
-  const maxChars = opts.maxChars ?? 4000;
+  const maxNodes = opts.maxNodes ?? 80;
+  const maxChars = opts.maxChars ?? 8000;
   const onebot = opts.onebot || null;
   const depth = opts.depth ?? 0;
-  const maxDepth = opts.maxDepth ?? 4;
+  const maxDepth = opts.maxDepth ?? 8;
   const seen = opts.seen || new Set();
   const lines = [];
   const media = [];
@@ -677,10 +690,12 @@ export async function expandForwardNodes(nodes, opts = {}) {
     return chunks.filter(Boolean).join('\n');
   };
 
+  let shown = 0;
   for (let i = 0; i < nodes.length; i++) {
-    if (lines.length >= maxNodes) { truncated = nodes.length - i; break; }
+    if (shown >= maxNodes) { truncated = nodes.length - i; break; }
     const body = await segmentText(nodes[i]?.message ?? nodes[i]?.content);
     if (!body) continue;
+    shown += 1;
     pushBlock(lines, senderLabel(nodes[i]), body);
     if (lines.join('\n').length > maxChars) { truncated = nodes.length - i - 1; break; }
   }

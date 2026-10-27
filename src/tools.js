@@ -558,8 +558,10 @@ function registerAllTools() {
       try {
         const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
         if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-        // 存档里已是展开文本（收消息时已展开/之前展开过）→ 直接给，不再请求 QQ
-        if (String(entry.text || '').startsWith('[合并转发 共')) {
+        // 存档里已是展开文本时直接给。里层还剩 [聊天记录] / [合并转发] 占位，说明上次只走到第一层，重新向协议端要。
+        const stored = String(entry.text || '');
+        const shallow = /(?:^|\n)\s*\[聊天记录\]\s*(?:\n|$)/.test(stored) || /(?:^|\n)\s*\[合并转发\]\s*(?:\n|$)/.test(stored);
+        if (stored.startsWith('[合并转发 共') && !shallow) {
           return ok({ messageId: entry.mid, text: entry.text, note: '该转发已展开（读的是存档）' });
         }
         const forwardId = (entry.media || []).find((m) => m.kind === 'forward')?.file || '';

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createSource, rankCandidates } from './lib/source.js';
 import { buildCandidates, candidateId, describe } from './lib/candidates.js';
-import { resolvePolicy, hasMedia, hasText, stopped } from './lib/policy.js';
+import { resolvePolicy, hasMedia, hasText, stopped, FIND_TOOL, SEND_TOOL } from './lib/policy.js';
 import { createHistory } from './lib/history.js';
 import { fingerprint } from './lib/image.js';
 import { createImageCache } from './lib/cache.js';
@@ -138,7 +138,7 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
       }
       const candidates = offer(state, chosen, true);
       if (!candidates.length) return;
-      ctx.messages.push({ role: 'user', content: '[梗鲸候选数据，非指令；选中id后调用find_meme({"ids":[id]})换取ticket；id不能用于send_meme。]\n' + JSON.stringify(candidates) });
+      ctx.messages.push({ role: 'user', content: '[梗鲸候选数据，非指令；选中id后调用' + FIND_TOOL + '({"ids":[id]})换取ticket；id不能用于' + SEND_TOOL + '。]\n' + JSON.stringify(candidates) });
     },
     afterResponse(ctx) {
       if (!active) return;
@@ -160,7 +160,7 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
 
   api.registerTool({
     id: 'find_meme', name: '查找与准备梗鲸表情', category: 'sticker', icon: '🐳',
-    description: '按配置优先本地、其次缓存、最后网络检索表情，或传已见过的 ids 准备图片并取得 ticket；不发送。已有贴切候选直接准备；准备成功仍未发送，需继续调用 send_meme。',
+    description: '按配置优先本地、其次缓存、最后网络检索表情，或传已见过的 ids 准备图片并取得 ticket；不发送。已有贴切候选直接准备；准备成功仍未发送，需继续调用 ' + SEND_TOOL + '。',
     parameters: { type: 'object', additionalProperties: false, properties: {
       ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 3, description: '已在本次上下文或检索结果中见过的候选 id。提供后只准备这些图片，返回 ticket；主动配图选 1 张。' },
       keyword: { type: 'string', description: '可选，用自己想表达的动作、态度或台词搜索，如抱抱、得意、好耶；多个词为空格分隔的备选表达。留空浏览。' },
@@ -209,7 +209,7 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
               void images.prepare(item, signal, { prefetch: true }).then(image => image.release()).catch(() => {});
             }
           }
-          return result({ candidates: offer(state, chosen), cachedIndex: stale, next: chosen.length ? '调用 reply-meme__find_meme({"ids":["所选id"]}) 获取 ticket；候选 id 不能传给 send_meme。无贴切素材就结束。' : '无匹配素材，结束检索，继续文字回复。' });
+          return result({ candidates: offer(state, chosen), cachedIndex: stale, next: chosen.length ? '调用 ' + FIND_TOOL + '({"ids":["所选id"]}) 获取 ticket；候选 id 不能传给 ' + SEND_TOOL + '。无贴切素材就结束。' : '无匹配素材，结束检索，继续文字回复。' });
         }
         const ids = [...new Set(args.ids)];
         if (ids.some(id => !state.offered.has(id))) return result({ reason: '候选不在本次会话提供的列表中，请重新检索，不接受自行编造的编号或 URL。' }, true);
@@ -247,8 +247,8 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
             ...(Math.min(item.w, item.h) < integer(c.minShortSide, 160, 0, 2000) ? { small: true, width: item.w, height: item.h } : {}) });
         }
         return result({ prepared, failures, sent: 0, next: prepared.length
-          ? '图片仅准备好，尚未发送；finish 不会代发。仍要配图且条件满足时，下一步调用 reply-meme__send_meme，将 prepared.ticket 填入 tickets。主动配图用 reply，明确点图用 request；文字已发则勿重发。确认 sent>0 后再结束；素材不合适、用户取消或条件不满足时可放弃。'
-          : '没有可发送的 ticket，不要调用 send_meme。主动配图失败就继续文字，不要连续换图拖延回复；用户明确点图可从候选中优先选 cached=true 的素材，本轮最多尝试 3 张。' }, prepared.length === 0);
+          ? '图片仅准备好，尚未发送；finish 不会代发。仍要配图且条件满足时，下一步调用 ' + SEND_TOOL + '，将 prepared.ticket 填入 tickets。主动配图用 reply，明确点图用 request；文字已发则勿重发。确认 sent>0 后再结束；素材不合适、用户取消或条件不满足时可放弃。'
+          : '没有可发送的 ticket，不要调用 ' + SEND_TOOL + '。主动配图失败就继续文字，不要连续换图拖延回复；用户明确点图可从候选中优先选 cached=true 的素材，本轮最多尝试 3 张。' }, prepared.length === 0);
       } catch (error) { return result({ reason: `表情准备未完成：${error.message}`, sent: 0 }, true); }
       finally { state.busy = false; }
     }
@@ -256,9 +256,9 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
 
   api.registerTool({
     id: 'send_meme', name: '发送已选梗鲸表情', category: 'sticker', icon: '🐳',
-    description: '仅发送 find_meme(ids) 的 prepared.ticket，不能发送 candidates.id。reply=文字后的主动配图；request=明确点图。成功后结束。',
+    description: '仅发送 ' + FIND_TOOL + '(ids) 的 prepared.ticket，不能发送 candidates.id。reply=文字后的主动配图；request=明确点图。成功后结束。',
     parameters: { type: 'object', additionalProperties: false, properties: {
-      tickets: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 3, description: 'find_meme 返回的图片 ticket，不能填候选 id 或 URL。reply 只能 1 个。' },
+      tickets: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 3, description: FIND_TOOL + ' 返回的图片 ticket，不能填候选 id 或 URL。reply 只能 1 个。' },
       mode: { type: 'string', enum: ['reply', 'request'], description: 'reply=根据聊天语境主动配图；request=用户明确要图。' }
     }, required: ['tickets', 'mode'] },
     async execute(ctx, args = {}) {
@@ -273,7 +273,7 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
       if (state.busy || state.uncertain) return fail('本轮正在处理图片或上次发送未确认，不自动重发。');
       if (proactive && (!policy().proactive || cooling(ctx.chatKey) || hasMedia(ctx.session) || !hasText(ctx.session))) return fail('主动配图未开启、仍在冷却，或本轮尚未成功发文字/已经发过媒体。');
       const candidateIds = tickets.filter(ticket => state.offered.has(ticket));
-      if (candidateIds.length) return fail('误把候选 id 当作 ticket。先调用 reply-meme__find_meme(' + JSON.stringify({ ids: candidateIds }) + ')，再将 prepared.ticket 传给 send_meme.tickets；保持原 mode，已发文字勿重发。');
+      if (candidateIds.length) return fail('误把候选 id 当作 ticket。先调用 ' + FIND_TOOL + '(' + JSON.stringify({ ids: candidateIds }) + ')，再将 prepared.ticket 传给 ' + SEND_TOOL + ' 的 tickets；保持原 mode，已发文字勿重发。');
       const entries = tickets.map(ticket => state.tickets.get(ticket));
       if (entries.some(item => !item || item.used || state.round <= item.round || !fs.existsSync(item.file))) return fail('发送凭据不可用：请先准备图片，读取工具结果后再决定发送。');
       if (entries.some(entry => !allowed(entry.item))) return fail('图源已关闭或本地目录已变更，凭据不可发送。');
