@@ -489,7 +489,16 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
         out.push(replyText || '[引用消息]');
         break;
       }
-      case 'json': out.push('[卡片消息]'); break;
+      case 'json': {
+        const card = bilibiliCardOf(seg);
+        out.push(card ? biliVideoLabel(card) : '[卡片消息]');
+        break;
+      }
+      case 'xml': {
+        const card = bilibiliCardOf(seg);
+        out.push(card ? biliVideoLabel(card) : '[xml]');
+        break;
+      }
       case 'forward': {
         // 不把卡片 id 写进正文：那串 id 又长又会过期，模型拿去当参数必失败。
         // 展开走 fetchForwardNodes，用消息前的 #数字。
@@ -500,6 +509,28 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
     }
   }
   return sanitizeUserText(out.join('').trim());
+}
+
+/**
+ * QQ 小程序里的 B站视频。插件提供 `message.bilibili-card` 时才认，
+ * 没装插件就仍是普通卡片。解析是同步的，下载留到 read_video。
+ */
+function bilibiliCardOf(seg) {
+  try {
+    const fn = skillManager.getCapabilityProviders('message.bilibili-card')[0]?.fn;
+    if (!fn) return null;
+    const card = fn(seg);
+    if (!card || card.skip || card.ok === false) return null;
+    if (!card.bvid && !card.aid && !card.pageUrl) return null;
+    return card;
+  } catch {
+    return null;
+  }
+}
+
+function biliVideoLabel(card) {
+  const title = String(card?.title || '').replace(/\s+/g, ' ').trim();
+  return title ? `[B站视频] ${title}` : '[B站视频]';
 }
 
 /** 从消息段提取媒体定位信息（不下载）。 */
@@ -518,6 +549,21 @@ export function extractMediaFromSegments(segments) {
     } else if (seg.type === 'forward') {
       const id = String(d.id ?? d.res_id ?? '').trim();
       if (id) media.push({ kind: 'forward', file: id });
+    } else if (seg.type === 'json' || seg.type === 'xml') {
+      const card = bilibiliCardOf(seg);
+      if (card) {
+        media.push({
+          kind: 'video',
+          file: '',
+          url: '',
+          path: '',
+          bvid: String(card.bvid || ''),
+          aid: String(card.aid || ''),
+          pageUrl: String(card.pageUrl || ''),
+          title: String(card.title || ''),
+          source: 'bilibili-miniapp'
+        });
+      }
     }
   }
   return media;

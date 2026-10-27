@@ -1,4 +1,7 @@
-// 表情包记忆库（sticker-memory）—— 同一个表情包只让模型认一次。
+// 本地资料库（插件 id 仍是 sticker-memory，旧指纹和描述接着用）。
+// 图片和视频都记指纹 + 描述。下次同一份内容再出现，直接把描述交给模型，
+// 拦下 get_message_images / get_sticker_image / read_video，不再看一遍。
+// 自动遗忘默认关。打开后，早于 forgetDays 天的记录从最旧的一条开始删除。
 //
 // ══════════════════════════════════════════════════════════════════════════
 // 一、为什么是**插件**（plugins/，确定性型），不是技能（skills/）
@@ -45,9 +48,10 @@
 // 为了不拖慢对话：解析带预算（默认 2.8 秒，见 maxDownloadMs 设置），超预算就
 // **本轮不拦截**（照常看图），但下载在后台继续 —— 下一次再遇到就已经命中了。
 //
-// 命中的有效期按"同一个会话 / 跨会话"分两档（recheckSameChatHours 默认 24h、
-// recheckCrossChatDays 默认 7 天），过期会自动重新确认一次，避免群友改用法后
-// 一直用旧含义。两档都可以设成 0 = 永不重新确认（最省 token）。
+//   · 视频不整段下载来算指纹：QQ 的文件名、B站 BV 号先对上；
+//     本地文件还在时再抽样哈希（头尾各 256KB + 体积）。
+//   · 自动遗忘（autoForget，默认关）：打开后，记下时间早于 forgetDays 的记录
+//     从最旧的一条开始删除。关掉就一直留着，直到手动忘掉或顶到条数上限。
 //
 // ══════════════════════════════════════════════════════════════════════════
 // 三、边界（都不会让对话出错）
@@ -60,8 +64,7 @@
 //     才退回自带的护栏下载器（只放行公网 http(s)、限 12MB、8 秒超时、只收图片）。
 //   · 只读别人，不写别人的库：不改 data/stickers.json（那是 StickerManager
 //     的内存态，外部写会互相覆盖）。表情库的备注走模型自己的 sticker_note。
-//   · stickerOnly（默认开）：只缓存表情包/动图表情；截图、照片、带文字的图
-//     不缓存 —— 那些图再发一次内容可能已经变了，复用旧含义会答错。
+//   · 图片和视频都记。指纹是内容本身，同一份字节才会命中；内容变了就是新的一条。
 //   · 缓存落在 data/sticker-memory/，不用 process.cwd() 当锚点。
 //   · 不写任何密钥/Cookie：全部数据都在本机 data/sticker-memory/cache.json。
 
@@ -77,18 +80,23 @@ const FLUSH_DEBOUNCE_MS = 8000;
 const MAX_BYTES = 12 * 1024 * 1024;
 const MIN_VIEW_LINK_MS = 10 * 60 * 1000;      // "刚看过"的关联有效期（10 分钟）
 const MAX_PENDING_PER_CHAT = 6;
-const MAX_NOTE_CHARS = 200;
-const MAX_VALUE_CHARS = 40;
+const MAX_NOTE_CHARS = 400;
+const MAX_VALUE_CHARS = 180;
+
+const REMEMBER_TOOL = 'sticker-memory__remember_image';
+const FORGET_TOOL = 'sticker-memory__forget_cached_image';
 
 /** 与 plugin.json 的 settings 保持一致（留一份是为了加载顺序与容错）。 */
 const DEFAULTS = {
   enabled: true,
-  stickerOnly: true,
   maxCacheEntries: 2000,
-  recheckSameChatHours: 24,
-  recheckCrossChatDays: 7,
-  skipThreshold: 0.5,
-  maxDownloadMs: 2800
+  maxDownloadMs: 2800,
+  autoForget: false,
+  forgetDays: 30,
+  hotTrendManaged: true,
+  hotTrendMaxEntries: 300,
+  hotTrendAutoForget: true,
+  hotTrendForgetDays: 7
 };
 
 let cfg = () => ({ ...DEFAULTS });
@@ -107,13 +115,64 @@ function conf() {
   } catch { /* 配置读不到就用默认值 */ }
   return {
     enabled: merged.enabled !== false,
-    stickerOnly: merged.stickerOnly !== false,
     maxCacheEntries: clamp(Number(merged.maxCacheEntries), 50, 20000, DEFAULTS.maxCacheEntries),
-    recheckSameChatHours: Math.max(0, num(merged.recheckSameChatHours, DEFAULTS.recheckSameChatHours)),
-    recheckCrossChatDays: Math.max(0, num(merged.recheckCrossChatDays, DEFAULTS.recheckCrossChatDays)),
-    skipThreshold: clamp(Number(merged.skipThreshold), 0, 1, DEFAULTS.skipThreshold),
-    maxDownloadMs: clamp(Number(merged.maxDownloadMs), 200, 4500, DEFAULTS.maxDownloadMs)
+    maxDownloadMs: clamp(Number(merged.maxDownloadMs), 200, 4500, DEFAULTS.maxDownloadMs),
+    autoForget: merged.autoForget === true,
+    forgetDays: clamp(Math.round(Number(merged.forgetDays)), 1, 3650, DEFAULTS.forgetDays),
+    hotTrendManaged: merged.hotTrendManaged !== false,
+    hotTrendMaxEntries: clamp(Math.round(Number(merged.hotTrendMaxEntries)), 20, 2000, DEFAULTS.hotTrendMaxEntries),
+    hotTrendAutoForget: merged.hotTrendAutoForget !== false,
+    hotTrendForgetDays: clamp(Math.round(Number(merged.hotTrendForgetDays)), 1, 3650, DEFAULTS.hotTrendForgetDays)
   };
+}
+
+const SOURCE_POLICIES = {
+  media: {
+    label: '图片和视频',
+    managed: (c) => c.enabled,
+    maxEntries: (c) => c.maxCacheEntries,
+    autoForget: (c) => c.autoForget,
+    forgetDays: (c) => c.forgetDays
+  },
+  'hot-trend-tracker': {
+    label: '热梗',
+    managed: (c) => c.enabled && c.hotTrendManaged,
+    maxEntries: (c) => c.hotTrendMaxEntries,
+    autoForget: (c) => c.hotTrendAutoForget,
+    forgetDays: (c) => c.hotTrendForgetDays
+  }
+};
+
+function policyOf(sourceId) {
+  const def = SOURCE_POLICIES[sourceId];
+  if (!def) return { available: false, source: sourceId, managed: false };
+  const c = conf();
+  return {
+    available: true,
+    source: sourceId,
+    label: def.label,
+    managed: Boolean(def.managed(c)),
+    maxEntries: def.maxEntries(c),
+    autoForget: Boolean(def.autoForget(c)),
+    forgetDays: def.forgetDays(c)
+  };
+}
+
+/** 热梗这类按时间堆积的记录：打开遗忘就删掉早于天数的，再按上限留下较新的。 */
+function retainTopics(topics, policy, now = nowMs()) {
+  const list = Array.isArray(topics) ? topics.filter((t) => t && t.title) : [];
+  let alive = list;
+  if (policy?.autoForget && policy.forgetDays > 0) {
+    const cutoff = now - policy.forgetDays * 86400000;
+    alive = list.filter((t) => Number(t.lastSeenAt || t.firstSeenAt || 0) >= cutoff);
+  }
+  const max = Math.max(1, Number(policy?.maxEntries) || alive.length || 1);
+  if (alive.length <= max) return alive;
+  return alive
+    .slice()
+    .sort((a, b) => Number(b.lastSeenAt || b.firstSeenAt || 0) - Number(a.lastSeenAt || a.firstSeenAt || 0)
+      || Number(b.score || 0) - Number(a.score || 0))
+    .slice(0, max);
 }
 
 function num(v, fallback) {
@@ -133,8 +192,8 @@ function clean(s, max = MAX_NOTE_CHARS) {
 }
 
 /** 提示词里的值要防注入：去掉换行/方括号，避免被当成系统指令。 */
-function safeValue(s) {
-  return clean(s, MAX_VALUE_CHARS).replace(/[[\]{}<>]/g, '').trim();
+function safeValue(s, max = MAX_VALUE_CHARS) {
+  return clean(s, max).replace(/[[\]{}<>]/g, '').trim();
 }
 
 function nowMs() {
@@ -195,10 +254,11 @@ function isAnimationMarker(summary) {
 
 // ─────────────────────────────────────────────── 记忆库存储层
 
-/** 内存库：entry = { src,file,st,chatKey,note,source,createdAt,usedAt,useCount,hits } */
+/** 内存库：entry = { src,file,st,vid,extra,kind,chatKey,note,source,createdAt,usedAt,useCount,hits } */
 const store = {
   entries: new Map(),
   byKey: new Map(),
+  buckets: new Map(),
   loadedAt: 0,
   dirty: false,
   lastFlush: 0
@@ -209,6 +269,10 @@ function keysOf(entry) {
   if (entry.src) keys.push(`src:${entry.src}`);
   if (entry.file) keys.push(`file:${entry.file}`);
   if (entry.st) keys.push(`st:${entry.st}`);
+  if (entry.vid) keys.push(`vid:${entry.vid}`);
+  for (const k of Array.isArray(entry.extra) ? entry.extra : []) {
+    if (k && !keys.includes(k)) keys.push(k);
+  }
   return keys;
 }
 
@@ -225,6 +289,7 @@ function unindexEntry(entry) {
 function loadStore() {
   if (store.loadedAt) return;
   store.loadedAt = nowMs();
+  store.buckets = new Map();
   const raw = readJson(CACHE_FILE, null);
   const list = Array.isArray(raw?.entries) ? raw.entries : [];
   for (const item of list) {
@@ -235,6 +300,11 @@ function loadStore() {
       src: clean(item.src, 64),
       file: clean(item.file, 200),
       st: clean(item.st, 120),
+      vid: clean(item.vid, 80),
+      extra: Array.isArray(item.extra)
+        ? item.extra.map((k) => clean(k, 220)).filter((k) => /^(src|file|st|vid):/.test(k)).slice(0, 8)
+        : [],
+      kind: item.kind === 'video' ? 'video' : 'image',
       chatKey: clean(item.chatKey, 60),
       note,
       source: item.source === 'model' ? 'model' : 'observed',
@@ -243,11 +313,20 @@ function loadStore() {
       useCount: Math.max(0, num(item.useCount, 0)),
       hits: Math.max(0, num(item.hits, 0))
     };
-    if (!entry.src && !entry.file && !entry.st) continue;
-    store.entries.set(`${entry.src}|${entry.file}|${entry.st}|${entry.createdAt}`, entry);
+    if (!entry.src && !entry.file && !entry.st && !entry.vid && !entry.extra.length) continue;
+    store.entries.set(`${entry.src}|${entry.file}|${entry.st}|${entry.vid}|${entry.createdAt}`, entry);
     indexEntry(entry);
   }
-  if (list.length) log(`记忆库已加载：${store.entries.size} 条（${path.basename(CACHE_FILE)}）`);
+  const buckets = raw?.buckets;
+  if (buckets && typeof buckets === 'object' && !Array.isArray(buckets)) {
+    for (const [id, bucket] of Object.entries(buckets)) {
+      if (!bucket || typeof bucket !== 'object' || Array.isArray(bucket)) continue;
+      store.buckets.set(id, bucket);
+    }
+  }
+  importHotTrendFile();
+  forgetExpired();
+  if (list.length) log(`资料库已加载：${store.entries.size} 条（${path.basename(CACHE_FILE)}）`);
 }
 
 function flushStore(force = false) {
@@ -257,22 +336,77 @@ function flushStore(force = false) {
   store.lastFlush = now;
   store.dirty = false;
   try {
+    forgetExpired();
     trimStore();
     writeJsonAtomic(CACHE_FILE, {
-      version: 1,
+      version: 3,
       savedAt: new Date(now).toISOString(),
       entries: [...store.entries.values()].map((e) => ({
-        src: e.src, file: e.file, st: e.st, chatKey: e.chatKey,
+        src: e.src, file: e.file, st: e.st, vid: e.vid || '', extra: e.extra || [],
+        kind: e.kind === 'video' ? 'video' : 'image',
+        chatKey: e.chatKey,
         note: e.note, source: e.source,
         createdAt: e.createdAt, usedAt: e.usedAt, useCount: e.useCount, hits: e.hits
-      }))
+      })),
+      buckets: Object.fromEntries(store.buckets)
     });
+    store.dirty = false;
     return true;
   } catch (error) {
     warn(`记忆库写盘失败：${error?.message ?? error}`);
     store.dirty = true;
     return false;
   }
+}
+
+function importHotTrendFile() {
+  const id = 'hot-trend-tracker';
+  if (store.buckets.has(id)) return;
+  const file = path.join(DATA_DIR, 'hot-trends.json');
+  if (!fs.existsSync(file)) return;
+  let parsed = null;
+  try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+  if (!parsed || !Array.isArray(parsed.topics)) return;
+  store.buckets.set(id, parsed);
+  store.dirty = true;
+  if (!flushStore(true)) {
+    warn('热梗资料并入后写盘失败，原文件先留着');
+    return;
+  }
+  try { fs.renameSync(file, `${file}.imported`); } catch { /* 原文件留着也不影响，桶里已经有了 */ }
+  log(`已把热梗资料并入本地资料库，共 ${parsed.topics.length} 条`);
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function libraryBucket(args = {}) {
+  const source = String(args.source || '');
+  const policy = policyOf(source);
+  if (!policy.available) return { available: false, managed: false };
+  if (args.action === 'policy' || !args.action) return policy;
+  loadStore();
+  if (args.action === 'load') {
+    const bucket = store.buckets.get(source);
+    return { ...policy, store: bucket ? cloneJson(bucket) : null };
+  }
+  if (args.action === 'save') {
+    const incoming = args.store;
+    if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return { ...policy, ok: false };
+    const next = cloneJson(incoming);
+    let pruned = 0;
+    if (policy.managed && Array.isArray(next.topics)) {
+      const kept = retainTopics(next.topics, policy);
+      pruned = next.topics.length - kept.length;
+      next.topics = kept;
+    }
+    store.buckets.set(source, next);
+    store.dirty = true;
+    flushStore(true);
+    return { ...policy, ok: true, pruned, total: Array.isArray(next.topics) ? next.topics.length : 0 };
+  }
+  return policy;
 }
 
 function trimStore() {
@@ -294,26 +428,51 @@ function score(e) {
   return (e.useCount || 0) * 1e12 + (e.usedAt || e.createdAt || 0);
 }
 
-function putEntry({ keys = [], note, chatKey = '', source = 'observed', onlyIfEmpty = false }) {
+function forgetExpired() {
+  const c = conf();
+  if (!c.autoForget) return 0;
+  const cutoff = nowMs() - c.forgetDays * 86400000;
+  const old = [...store.entries.entries()]
+    .filter(([, e]) => Number(e.createdAt) > 0 && Number(e.createdAt) < cutoff)
+    .sort((a, b) => Number(a[1].createdAt) - Number(b[1].createdAt));
+  if (!old.length) return 0;
+  for (const [id, entry] of old) {
+    unindexEntry(entry);
+    store.entries.delete(id);
+  }
+  store.dirty = true;
+  log(`自动遗忘：删掉 ${old.length} 条早于 ${c.forgetDays} 天的记录（从最旧的开始）`);
+  return old.length;
+}
+
+function putEntry({ keys = [], note, chatKey = '', source = 'observed', onlyIfEmpty = false, kind = '' }) {
   loadStore();
   const cleanNote = clean(note);
   if (!cleanNote) return { ok: false, reason: 'note 为空' };
-  const src = clean(keys.find((k) => String(k).startsWith('src:'))?.slice(4) || '', 64);
-  const file = clean(keys.find((k) => String(k).startsWith('file:'))?.slice(5) || '', 200);
-  const st = clean(keys.find((k) => String(k).startsWith('st:'))?.slice(3) || '', 120);
-  if (!src && !file && !st) return { ok: false, reason: '没有可用的指纹' };
+  const parts = keysToObject(keys);
+  if (!parts.src && !parts.file && !parts.st && !parts.vid && !(parts.extra || []).length) {
+    return { ok: false, reason: '没有可用的指纹' };
+  }
 
-  // 先看是不是已经认识这个表情（命中任意键即同一条）
-  const hit = lookupByKeys({ src, file, st });
+  const hit = lookupByKeys(parts);
   if (hit) {
     if (onlyIfEmpty && hit.note) return { ok: true, entry: hit, unchanged: true };
     hit.note = cleanNote;
     hit.source = source;
     hit.usedAt = nowMs();
     hit.useCount = (hit.useCount || 0) + 1;
-    if (src && !hit.src) hit.src = src;
-    if (file && !hit.file) hit.file = file;
-    if (st && !hit.st) hit.st = st;
+    if (parts.src && !hit.src) hit.src = parts.src;
+    if (parts.file && !hit.file) hit.file = parts.file;
+    if (parts.st && !hit.st) hit.st = parts.st;
+    if (parts.vid && !hit.vid) hit.vid = parts.vid;
+    else if (parts.vid && hit.vid && parts.vid !== hit.vid) {
+      const extraKey = `vid:${parts.vid}`;
+      if (!keysOf(hit).includes(extraKey)) hit.extra = [...(hit.extra || []), extraKey];
+    }
+    for (const k of parts.extra || []) {
+      if (k && !keysOf(hit).includes(k)) hit.extra = [...(hit.extra || []), k];
+    }
+    if (kind === 'image' || kind === 'video') hit.kind = kind;
     if (chatKey) hit.chatKey = chatKey;
     indexEntry(hit);
     store.dirty = true;
@@ -321,7 +480,9 @@ function putEntry({ keys = [], note, chatKey = '', source = 'observed', onlyIfEm
   }
 
   const entry = {
-    src, file, st,
+    src: parts.src, file: parts.file, st: parts.st, vid: parts.vid,
+    extra: parts.extra || [],
+    kind: kind === 'video' || parts.vid ? 'video' : 'image',
     chatKey: clean(chatKey, 60),
     note: cleanNote,
     source,
@@ -330,27 +491,33 @@ function putEntry({ keys = [], note, chatKey = '', source = 'observed', onlyIfEm
     useCount: 0,
     hits: 0
   };
-  store.entries.set(`${src}|${file}|${st}|${entry.createdAt}`, entry);
+  store.entries.set(`${entry.src}|${entry.file}|${entry.st}|${entry.vid}|${entry.createdAt}`, entry);
   indexEntry(entry);
   store.dirty = true;
   return { ok: true, entry, created: true };
 }
 
-function lookupByKeys({ src = '', file = '', st = '' } = {}) {
+function lookupByKeys(spec = {}) {
   loadStore();
-  if (src) { const e = store.byKey.get(`src:${src}`); if (e) return e; }
-  if (file) { const e = store.byKey.get(`file:${file}`); if (e) return e; }
-  if (st) { const e = store.byKey.get(`st:${st}`); if (e) return e; }
+  const keys = [];
+  if (Array.isArray(spec)) keys.push(...spec);
+  else {
+    if (spec.src) keys.push(`src:${spec.src}`);
+    if (spec.file) keys.push(`file:${spec.file}`);
+    if (spec.st) keys.push(`st:${spec.st}`);
+    if (spec.vid) keys.push(`vid:${spec.vid}`);
+    if (Array.isArray(spec.extra)) keys.push(...spec.extra);
+  }
+  for (const k of keys) {
+    const e = store.byKey.get(String(k));
+    if (e) return e;
+  }
   return null;
 }
 
 function forgetEntry(keys = []) {
   loadStore();
-  const hit = lookupByKeys({
-    src: clean(keys.find((k) => String(k).startsWith('src:'))?.slice(4) || '', 64),
-    file: clean(keys.find((k) => String(k).startsWith('file:'))?.slice(5) || '', 200),
-    st: clean(keys.find((k) => String(k).startsWith('st:'))?.slice(3) || '', 120)
-  });
+  const hit = lookupByKeys(keysToObject(keys));
   if (!hit) return false;
   unindexEntry(hit);
   for (const [id, e] of store.entries) {
@@ -537,21 +704,113 @@ function currentOnebot() {
   return onebotRef;
 }
 
+const VIDEO_SAMPLE = 256 * 1024;
+
+function sampleFileHash(filePath) {
+  let fd = null;
+  try {
+    const st = fs.statSync(filePath);
+    if (!st.isFile() || st.size <= 0 || st.size > 2 * 1024 * 1024 * 1024) return '';
+    fd = fs.openSync(filePath, 'r');
+    const headLen = Math.min(VIDEO_SAMPLE, st.size);
+    const head = Buffer.alloc(headLen);
+    fs.readSync(fd, head, 0, headLen, 0);
+    const tailLen = Math.min(VIDEO_SAMPLE, st.size);
+    const tail = Buffer.alloc(tailLen);
+    fs.readSync(fd, tail, 0, tailLen, Math.max(0, st.size - tailLen));
+    const hash = crypto.createHash('sha1');
+    hash.update(`v1:${st.size}:`);
+    hash.update(head);
+    hash.update(tail);
+    return hash.digest('hex').slice(0, 32);
+  } catch {
+    return '';
+  } finally {
+    if (fd != null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
+function cheapVideoKeys(media) {
+  const keys = [];
+  const file = clean(media?.file, 200);
+  const bvid = clean(media?.bvid, 32);
+  const aid = clean(media?.aid, 32);
+  const pageUrl = String(media?.pageUrl || '').trim();
+  if (file) keys.push(`file:${file}`);
+  if (bvid) keys.push(`vid:${bvid}`);
+  if (aid) keys.push(`vid:${/^av/i.test(aid) ? aid : `av${aid}`}`);
+  if (pageUrl) keys.push(`vid:url_${sha1(Buffer.from(pageUrl))}`);
+  return keys;
+}
+
+/** 视频指纹：先用文件名和 BV 号，本地文件还在时再抽样哈希。不整段下载。 */
+async function resolveVideoKeys(media, budgetMs) {
+  if (!media || media.kind && media.kind !== 'video') return null;
+  loadStore();
+  const keys = cheapVideoKeys(media);
+  if (keys.some((k) => store.byKey.has(k))) return keys;
+
+  const deadline = nowMs() + Math.max(0, Number(budgetMs) || 0);
+  let local = '';
+  const pathHint = String(media.path || '').trim();
+  if (pathHint && fs.existsSync(pathHint)) local = pathHint;
+  const file = clean(media.file, 200);
+  if (!local && file && (/^[A-Za-z]:[\\/]/.test(file) || file.startsWith('/')) && fs.existsSync(file)) local = file;
+  if (!local && file && nowMs() < deadline) {
+    try {
+      const onebot = currentOnebot();
+      if (onebot?.call) {
+        const ret = await onebot.call('get_video', { file: String(file) });
+        const p = ret?.file ? String(ret.file) : '';
+        if (p && fs.existsSync(p)) local = p;
+      }
+    } catch { /* 没有本地文件就只用文件名和 BV 号 */ }
+  }
+  if (local) {
+    const hash = sampleFileHash(local);
+    if (hash) keys.push(`src:${hash}`);
+  }
+  if (keys.length) rememberKeys(keys);
+  return keys.length ? keys : null;
+}
+
+function addResolved(st, entryId, item) {
+  const id = String(entryId || '');
+  if (!id || !item?.keys?.length) return;
+  const prev = st.resolved.get(id);
+  const items = Array.isArray(prev?.items) ? prev.items.slice() : [];
+  const idx = items.findIndex((it) => it.media === item.media);
+  if (idx >= 0) items[idx] = item;
+  else items.push(item);
+  st.resolved.set(id, { items, keys: items[0].keys, media: items[0].media });
+}
+
+function resolvedItems(rec) {
+  if (!rec) return [];
+  if (Array.isArray(rec.items) && rec.items.length) return rec.items;
+  if (Array.isArray(rec.keys)) return [rec];
+  return [];
+}
+
+function kindLabel(kind) {
+  return kind === 'video' ? '视频' : '图片';
+}
+
+function stampKnown(text, kind, note) {
+  const value = safeValue(note);
+  if (kind === 'video') {
+    if (text.includes('[B站视频]')) return text.replace('[B站视频]', `[B站视频·已知资料：${value}]`);
+    if (text.includes('[视频]')) return text.replace('[视频]', `[视频·已知资料：${value}]`);
+    return `${text}${text ? ' ' : ''}${`[视频·已知资料：${value}]`}`;
+  }
+  if (text.includes('[图片]')) return text.replace('[图片]', `[图片·已知资料：${value}]`);
+  return `${text}${text ? ' ' : ''}${`[图片·已知资料：${value}]`}`;
+}
+
 // ─────────────────────────────────────────────── 有效性判定
 
-function validForChat(entry, chatKey) {
-  if (!entry) return false;
-  const c = conf();
-  const age = nowMs() - (entry.usedAt || entry.createdAt || 0);
-  const sameChat = entry.chatKey && entry.chatKey === chatKey;
-  const ttl = sameChat
-    ? (c.recheckSameChatHours > 0 ? c.recheckSameChatHours * 3600 * 1000 : Infinity)
-    : (c.recheckCrossChatDays > 0 ? c.recheckCrossChatDays * 86400 * 1000 : Infinity);
-  if (age <= ttl) return true;
-  // 过期：从索引上摘掉（条目本身留着，重新看图后再覆盖）
-  unindexEntry(entry);
-  store.dirty = true;
-  return false;
+function validForChat(entry) {
+  return Boolean(entry && entry.note);
 }
 
 function markHit(entry, chatKey) {
@@ -651,6 +910,7 @@ export const hooks = {
       const c = conf();
       if (!c.enabled) return;
       loadStore();
+      forgetExpired();
       flushStore();
       pruneSessions();
       const st = sessionState(sessionId, chatKey);
@@ -664,12 +924,13 @@ export const hooks = {
         if (localId && mid) st.byMid.set(mid, localId);
         const media = Array.isArray(entry?.media) ? entry.media : [];
         for (const m of media) {
-          if (!m || (m.kind !== 'image' && m.kind !== 'sticker')) continue;
-          if (!isLikelySticker(m) && c.stickerOnly) continue;
+          if (!m || (m.kind !== 'image' && m.kind !== 'sticker' && m.kind !== 'video')) continue;
           const left = deadline - nowMs();
-          if (left < 300) return;             // 预算用完：剩下的交给下一次（后台仍在算）
-          const keys = await resolveMediaKeys(m, left);
-          if (keys && keys.length) st.resolved.set(localId || mid, { keys, media: m });
+          if (left < 300) return;
+          const keys = (m.kind === 'video')
+            ? await resolveVideoKeys(m, left)
+            : await resolveMediaKeys(m, left);
+          if (keys && keys.length) addResolved(st, localId || mid, { keys, media: m });
         }
       }
     } catch (error) {
@@ -692,49 +953,44 @@ export const hooks = {
 
       const known = [];
       for (const [entryId, rec] of st.resolved) {
-        const entry = lookupByKeys(keysToObject(rec.keys));
-        if (!entry || !validForChat(entry, chatKey)) continue;
-        if (!entry.note) continue;
-        known.push({ entryId, note: entry.note, keys: rec.keys, entry });
+        for (const item of resolvedItems(rec)) {
+          const entry = lookupByKeys(keysToObject(item.keys));
+          if (!entry || !validForChat(entry)) continue;
+          known.push({
+            entryId,
+            note: entry.note,
+            keys: item.keys,
+            entry,
+            kind: item.media?.kind === 'video' ? 'video' : 'image',
+            media: item.media
+          });
+        }
       }
-
-      // 收藏表情那条链：触发消息里没有图，但模型接下来可能要看某个收藏表情。
-      // 这里不做主动注入（那会污染上下文），交给 before-tool 拦截。
 
       if (!known.length) return;
       st.injected = true;
       st.saved = known.map((k) => k.entryId);
 
-      // ① 内联进触发消息文本：把 [图片] 换成 [图片·已知表情包：含义]
       for (const k of known) {
         const target = (Array.isArray(triggerEntries) ? triggerEntries : [])
           .find((e) => String(e?.id ?? e?.mid) === String(k.entryId));
         if (!target) continue;
-        const tag = `[图片·已知表情包：${safeValue(k.note)}]`;
-        const text = String(target.text || '');
-        target.text = text.includes('[图片]')
-          ? text.replace('[图片]', tag)
-          : `${text}${text ? ' ' : ''}${tag}`;
-        // 让模型在用 get_message_images 前就有完整信息：把媒体标记成"已知"
-        if (Array.isArray(target.media)) {
-          for (const m of target.media) { if (m && (m.kind === 'image' || m.kind === 'sticker')) m.knownMeaning = k.note; }
-        }
+        target.text = stampKnown(String(target.text || ''), k.kind, k.note);
+        if (k.media) k.media.knownMeaning = k.note;
       }
 
-      // ② 追加系统说明（只改最后一条 user 消息，不动 system 规则）
       const idx = lastUserIndex(messages);
       if (idx >= 0) {
         const lines = [
-          `【表情包记忆库】本轮消息里的 ${known.length} 张图片已经在库里，含义如下（直接用，不用再看图）：`,
-          ...known.slice(0, 8).map((k) => `- 消息 #${k.entryId}：${safeValue(k.note)}`)
+          `【本地资料库】本轮有 ${known.length} 条图片或视频已经看过，描述如下（直接用，不用再看）：`,
+          ...known.slice(0, 8).map((k) => `- 消息 #${k.entryId}（${kindLabel(k.kind)}）：${safeValue(k.note)}`)
         ];
-        lines.push('这些图不要调用 get_message_images / get_sticker_image —— 系统会拦下这次调用，看图也会白花时间和 token。');
-        lines.push('只有上下文里没有「已知表情包」提示的图，才是第一次见：看过之后请用 remember_image 把含义记下来，以后就不用再看了。');
+        lines.push(`这些不要调用 get_message_images、get_sticker_image 或 read_video。第一次见到的，看完后调用 ${REMEMBER_TOOL} 把描述记下来。`);
         appendToMessage(messages[idx], `\n\n${lines.join('\n')}`);
       }
 
       for (const k of known) markHit(k.entry, chatKey);
-      log(`命中记忆库 ${known.length} 张表情包，已跳过看图`);
+      log(`命中资料库 ${known.length} 条，已跳过再看`);
     } catch (error) {
       warn(`before-llm-messages 注入失败（不影响对话）：${error?.message ?? error}`);
     }
@@ -753,10 +1009,35 @@ export const hooks = {
       if (!c.enabled) return;
       loadStore();
       const name = shortToolName(toolName);
-      if (name !== 'get_message_images' && name !== 'get_sticker_image') return;
+      if (name !== 'get_message_images' && name !== 'get_sticker_image' && name !== 'read_video') return;
 
       const st = sessionState(sessionId, chatKey);
       const args = safeParse(argsRaw) || {};
+
+      if (name === 'read_video') {
+        const mid = String(args.messageId ?? args.message_id ?? '').trim();
+        if (!mid) return;
+        const record = findChatEntry(st, mid);
+        const video = (Array.isArray(record?.media) ? record.media : []).find((m) => m && m.kind === 'video');
+        if (!video) return;
+        const localId = String(record?.id ?? '');
+        const rec = localId ? st.resolved.get(localId) : null;
+        const cached = resolvedItems(rec).find((it) => it.media === video);
+        const keys = cached?.keys || await resolveVideoKeys(video, Math.min(c.maxDownloadMs, 2500));
+        const entry = keys && lookupByKeys(keysToObject(keys));
+        if (entry && validForChat(entry)) {
+          markHit(entry, chatKey);
+          if (localId && keys) addResolved(st, localId, { keys, media: video });
+          st.viewed.set(mid, { at: nowMs(), localId, keys, kind: 'video' });
+          return {
+            block: true,
+            reason: `系统：已跳过看视频 —— 这条视频已经在【本地资料库】里。描述：${safeValue(entry.note)}。`
+              + `请直接用这段描述。若描述不对，用 ${REMEMBER_TOOL} 覆盖，或用 ${FORGET_TOOL} 删掉后下次再看。`
+          };
+        }
+        st.viewed.set(mid, { at: nowMs(), localId, kind: 'video' });
+        return;
+      }
 
       if (name === 'get_message_images') {
         const mid = String(args.messageId ?? args.message_id ?? '').trim();
@@ -770,44 +1051,29 @@ export const hooks = {
         let unreadable = 0;
         const localId = String(record?.id ?? '');
         for (const m of media) {
-          // 不是表情包（截图/照片）就不拦 —— 让模型自己看图。
-          // ⚠️ 例外：如果这张图本身就命中记忆库（说明以前明确记过它），
-          //    即使这次看不出来是表情包也照拦 —— 命中的含义就是它自己的含义。
-          const looksSticker = isLikelySticker(m);
-          if (!looksSticker && c.stickerOnly) {
-            const recPeek = localId ? st.resolved.get(localId) : null;
-            const earlyKeys = (recPeek && recPeek.media === m) ? recPeek.keys : null;
-            if (!earlyKeys || !lookupByKeys(keysToObject(earlyKeys))) { unreadable += 1; continue; }
-          }
           const rec = localId ? st.resolved.get(localId) : null;
-          const keys = (rec && rec.media === m) ? rec.keys : await resolveMediaKeys(m, Math.min(c.maxDownloadMs, 2500));
+          const cached = resolvedItems(rec).find((it) => it.media === m);
+          const keys = cached?.keys || await resolveMediaKeys(m, Math.min(c.maxDownloadMs, 2500));
           if (!keys) { unreadable += 1; continue; }
+          if (localId) addResolved(st, localId, { keys, media: m });
           const entry = lookupByKeys(keysToObject(keys));
-          if (entry && validForChat(entry, chatKey)) {
+          if (entry && validForChat(entry)) {
             known += 1;
-            resolved.push({ keys, entry });
+            resolved.push({ keys, entry, media: m });
           }
         }
 
-        const usable = media.length - unreadable;
-        if (known > 0 && usable > 0 && known / usable >= c.skipThreshold) {
+        if (media.length > 0 && unreadable === 0 && known === media.length) {
           for (const r of resolved) markHit(r.entry, chatKey);
-          // 顺手把"刚看过这张（已认识的）图"记下来，并把指纹留在会话状态里：
-          // ① 模型若想用 remember_image 改写含义（群友纠正过），这次调用能对上号；
-          // ② 这一轮里再有人（模型）想调 get_message_images，零成本就能再次拦下。
-          const firstMedia = media.find((m) => isLikelySticker(m)) || media[0];
-          if (localId && firstMedia) st.resolved.set(localId, { keys: resolved[0].keys, media: firstMedia });
-          st.viewed.set(mid, { at: nowMs(), localId: localId || '', keys: resolved[0].keys });
+          const allKeys = resolved.flatMap((r) => r.keys);
+          st.viewed.set(mid, { at: nowMs(), localId: localId || '', keys: allKeys });
           const list = resolved.map((r) => `「${safeValue(r.entry.note)}」`).join('、');
-          const extra = resolved.length < usable ? `（另有 ${usable - resolved.length} 张本轮还没算出指纹，需要的话再看）` : '';
           return {
             block: true,
-            reason: `系统：已跳过看图 —— 这些图片已经在【表情包记忆库】里，含义是 ${list}${extra}。`
-              + '请直接用上面的含义理解并回应。'
-              + '如果这次它们的用法明显和记的不一样，用 remember_image 传新含义覆盖它。'
+            reason: `系统：已跳过看图 —— 这些图片已经在【本地资料库】里，描述是 ${list}。`
+              + `请直接用上面的描述。若描述不对，用 ${REMEMBER_TOOL} 覆盖。`
           };
         }
-        // 没拦下：交给 after-tool 算指纹，等模型看完图调 remember_image
         st.viewed.set(mid, { at: nowMs(), localId: localId || '' });
         return;
       }
@@ -821,7 +1087,7 @@ export const hooks = {
           block: true,
           reason: `系统：这个收藏表情已经在你的表情库里，含义/备注是「${safeValue(known.note)}」。`
             + '不需要再看图 —— 直接用这个理解决定要不要发、发给谁。'
-            + '如果这次你觉得含义记错了，用 sticker_note 更新备注，或用 remember_image 覆盖记忆库。'
+            + `如果这次你觉得描述不对，用 sticker_note 更新备注，或用 ${REMEMBER_TOOL} 覆盖资料库。`
         };
       }
       st.viewed.set(`sticker:${stickerRef}`, { sticker: stickerRef, at: nowMs(), chatKey: String(chatKey || '') });
@@ -843,11 +1109,30 @@ export const hooks = {
       if (!c.enabled) return;
       if (result?.isError) return;
       const name = shortToolName(toolName);
-      if (name !== 'get_message_images' && name !== 'get_sticker_image') return;
-
       const st = sessionState(sessionId, chatKey);
       st.at = nowMs();
       const args = safeParse(argsRaw);
+
+      if (name === 'save_description') {
+        const text = clean(args.text || args.note);
+        let newest = null;
+        for (const [, rec] of st.viewed) {
+          if (rec?.kind !== 'video' || nowMs() - rec.at > MIN_VIEW_LINK_MS) continue;
+          if (!newest || rec.at > newest.at) newest = rec;
+        }
+        let keys = Array.isArray(newest?.keys) ? newest.keys : [];
+        if (!keys.length && newest?.localId) {
+          const resolved = st.resolved.get(String(newest.localId));
+          keys = resolvedItems(resolved).filter((it) => it.media?.kind === 'video').flatMap((it) => it.keys || []);
+        }
+        if (text && keys.length) {
+          putEntry({ keys, note: text, chatKey: String(chatKey || ''), source: 'model', kind: 'video' });
+          flushStore(true);
+        }
+        return;
+      }
+
+      if (name !== 'get_message_images' && name !== 'get_sticker_image' && name !== 'read_video') return;
 
       if (name === 'get_sticker_image') {
         const ref = String(args.stickerId ?? args.sticker_id ?? args.id ?? '').trim();
@@ -858,22 +1143,25 @@ export const hooks = {
       const mid = String(args.messageId ?? args.message_id ?? '').trim();
       if (!mid) return;
       const record = findChatEntry(st, mid);
+      const wantVideo = name === 'read_video';
       const media = (Array.isArray(record?.media) ? record.media : [])
-        .filter((m) => m && (m.kind === 'image' || m.kind === 'sticker'));
+        .filter((m) => m && (wantVideo ? m.kind === 'video' : (m.kind === 'image' || m.kind === 'sticker')));
       if (!media.length) return;
 
       const localId = String(record?.id ?? '');
-      st.viewed.set(mid, { at: nowMs(), localId });
+      const picked = [];
       for (const m of media) {
         const rec = localId ? st.resolved.get(localId) : null;
-        if (rec && rec.media === m) {
-          rememberKeys(rec.keys);
-          continue;
+        const cached = resolvedItems(rec).find((it) => it.media === m);
+        const keys = cached?.keys || (wantVideo
+          ? await resolveVideoKeys(m, Math.min(c.maxDownloadMs, 2500))
+          : await resolveMediaKeys(m, Math.min(c.maxDownloadMs, 2500)));
+        if (keys && keys.length) {
+          if (localId) addResolved(st, localId, { keys, media: m });
+          for (const k of keys) if (!picked.includes(k)) picked.push(k);
         }
-        // 顺手把这条消息的指纹补进会话状态（下一次同图就是零成本命中）
-        const keys = await resolveMediaKeys(m, Math.min(c.maxDownloadMs, 2500));
-        if (keys && keys.length && localId) st.resolved.set(localId, { keys, media: m });
       }
+      st.viewed.set(mid, { at: nowMs(), localId, keys: picked, kind: wantVideo ? 'video' : 'image' });
       void session;
     } catch (error) {
       warn(`after-tool 记录指纹失败（不影响对话）：${error?.message ?? error}`);
@@ -882,12 +1170,14 @@ export const hooks = {
 };
 
 function keysToObject(keys) {
-  const out = { src: '', file: '', st: '' };
+  const out = { src: '', file: '', st: '', vid: '', extra: [] };
   for (const k of Array.isArray(keys) ? keys : []) {
     const s = String(k);
-    if (s.startsWith('src:')) out.src = s.slice(4);
-    else if (s.startsWith('file:')) out.file = s.slice(5);
-    else if (s.startsWith('st:')) out.st = s.slice(3);
+    if (s.startsWith('src:') && !out.src) out.src = clean(s.slice(4), 64);
+    else if (s.startsWith('file:') && !out.file) out.file = clean(s.slice(5), 200);
+    else if (s.startsWith('st:') && !out.st) out.st = clean(s.slice(3), 120);
+    else if (s.startsWith('vid:') && !out.vid) out.vid = clean(s.slice(4), 80);
+    else if (/^(src|file|st|vid):/.test(s)) out.extra.push(clean(s, 220));
   }
   return out;
 }
@@ -998,14 +1288,11 @@ function captureRuntimeRefs(st, ctx) {
 function registerStickerMemoryTools(api) {
   api.registerTool({
     id: 'remember_image',
-    name: '记住图片/表情包的含义',
+    name: '记下图片或视频',
     description:
-      '把你刚看过的表情包（或图片）的含义记进【表情包记忆库】，以后同一张图再出现时系统直接用这个含义，'
-      + '不用再看图（省时间、省识图 token）。'
-      + '什么时候用：① 你刚用 get_message_images / get_sticker_image 看过一张**以前没见过**的表情包或梗图；'
-      + '② 群友说你之前记的含义不对，要改写。'
-      + '什么时候不要用：截图、照片、带文字的图、内容会变的图（再发一次可能已经不是一回事了）——这些不要记。'
-      + 'note 写「画面里是什么 + 适合什么场合」，一句话，例如「举着白旗的道歉猫，服软/认错时用」。',
+      '把你刚看过的图片或视频的描述记进【本地资料库】。以后同一张图或同一个视频再出现时，系统直接用这段描述，不再看一遍。'
+      + '什么时候用：刚用 get_message_images、get_sticker_image 或 read_video 看过一份以前没有描述的图片或视频；或者群友说之前的描述不对，要改写。'
+      + 'note 用一两句写下画面里是什么。这段话只留在本地，不要发到群里。',
     category: 'sticker',
     icon: '🧠',
     parameters: {
@@ -1013,7 +1300,7 @@ function registerStickerMemoryTools(api) {
       properties: {
         note: {
           type: 'string',
-          description: '这个表情包/图片的含义与适用场合，一句话，例如「举白旗的猫，服软认错时用」。'
+          description: '画面描述，一两句。'
         },
         scope: {
           type: 'string',
@@ -1030,10 +1317,10 @@ function registerStickerMemoryTools(api) {
     async execute(ctx, args) {
       try {
         const c = conf();
-        if (!c.enabled) return { content: '错误：表情包记忆库已经被关掉了，这次不记录。', isError: true };
+        if (!c.enabled) return { content: '错误：本地资料库已经被关掉了，这次不记录。', isError: true };
         const note = clean(args?.note);
         if (!note || note.length < 2) {
-          return { content: '错误：note 太短了。请写一句「画面里是什么 + 适合什么场合」。', isError: true };
+          return { content: '错误：note 太短了。请用一两句写下画面里是什么。', isError: true };
         }
 
         const st = sessionState(ctx?.session?.id, ctx?.chatKey);
@@ -1041,27 +1328,38 @@ function registerStickerMemoryTools(api) {
         const keys = await collectFreshKeys(st);
         if (!keys.length) {
           return {
-            content: '错误：没找到你刚看过的图片（可能这一轮你没调用看图工具，或者那张图的指纹还没算出来）。'
-              + '先调用 get_message_images / get_sticker_image 看过图之后再调本工具，或者稍后再试一次。',
+          content: '错误：没找到你刚看过的图片或视频（可能这一轮你没调用看图或看视频，或者指纹还没算出来）。'
+            + `先调用 get_message_images、get_sticker_image 或 read_video 看过之后再调 ${REMEMBER_TOOL}。`,
             isError: true
           };
         }
 
+        let kind = 'image';
+        let newest = 0;
+        for (const [, rec] of st.viewed) {
+          if (!rec || nowMs() - rec.at > MIN_VIEW_LINK_MS) continue;
+          if ((rec.at || 0) >= newest && rec.kind) {
+            newest = rec.at || 0;
+            kind = rec.kind === 'video' ? 'video' : 'image';
+          }
+        }
         const scope = String(args?.scope || 'global').toLowerCase() === 'chat' ? 'chat' : 'global';
         const overwrite = args?.overwrite === true;
         const res = putEntry({
           keys,
           note,
+          kind,
           chatKey: scope === 'chat' ? String(ctx?.chatKey || '') : '',
           source: 'model',
           onlyIfEmpty: !overwrite
         });
         if (!res.ok) return { content: `错误：没能记下来（${res.reason}）。`, isError: true };
         flushStore(true);
-        log(`已记住一张图的含义（${res.created ? '新增' : res.updated ? '更新' : '未改动'}）：${note.slice(0, 40)}`);
+        const savedKind = res.entry?.kind === 'video' ? 'video' : 'image';
+        log(`已记下一条${kindLabel(savedKind)}（${res.created ? '新增' : res.updated ? '更新' : '未改动'}）：${note.slice(0, 40)}`);
         return {
-          content: `已记进表情包记忆库（${res.created ? '新增' : res.updated ? '已覆盖旧含义' : '库里已有更早的含义，未改动'}）。`
-            + '以后同一张图再出现，系统会直接把这条含义给你，不会再看图。'
+          content: `已记进本地资料库（${res.created ? '新增' : res.updated ? '已覆盖旧描述' : '库里已有更早的描述，未改动'}）。`
+            + '以后同一份内容再出现，系统会直接给出这段描述，不会再看。'
         };
       } catch (error) {
         return { content: `记录失败：${error?.message ?? error}`, isError: true };
@@ -1071,11 +1369,9 @@ function registerStickerMemoryTools(api) {
 
   api.registerTool({
     id: 'list_cached_images',
-    name: '查看表情包记忆库',
+    name: '查看本地资料库',
     description:
-      '列出【表情包记忆库】里已经记住的图片/表情包及其含义（含使用次数）。'
-      + '用途：想确认"这个表情包我是不是已经记过了"、或者要挑一个贴切的表情包时翻一翻。'
-      + '它是只读的，不会消耗识图 token。',
+      '列出【本地资料库】里已经记下的图片和视频，以及对应描述。只读，不会再去看画面。',
     category: 'sticker',
     icon: '📒',
     parameters: {
@@ -1094,16 +1390,16 @@ function registerStickerMemoryTools(api) {
           .filter((e) => (q ? String(e.note).toLowerCase().includes(q) : true))
           .sort((a, b) => (b.usedAt || b.createdAt) - (a.usedAt || a.createdAt));
         if (!all.length) {
-          return { content: q ? `记忆库里没有含义包含「${q}」的图。` : '表情包记忆库现在是空的（还没记过任何图）。' };
+          return { content: q ? `资料库里没有描述包含「${q}」的记录。` : '本地资料库现在是空的。' };
         }
         const lines = [
-          `表情包记忆库共 ${store.entries.size} 条，以下是最新的 ${Math.min(limit, all.length)} 条：`
+          `本地资料库共 ${store.entries.size} 条，以下是最近用过的 ${Math.min(limit, all.length)} 条：`
         ];
         for (const e of all.slice(0, limit)) {
-          const id = (e.src || e.file || e.st || '').slice(0, 10);
-          lines.push(`- ${e.note}（用过 ${e.useCount || 0} 次，指纹 ${id}）`);
+          const id = (e.vid || e.src || e.file || e.st || '').slice(0, 12);
+          lines.push(`- [${kindLabel(e.kind)}] ${e.note}（用过 ${e.useCount || 0} 次，指纹 ${id}）`);
         }
-        lines.push('要删掉某条用 forget_cached_image（传含义里的关键词即可）。');
+        lines.push(`要删掉某条用 ${FORGET_TOOL}（传描述里的关键词即可）。`);
         return { content: lines.join('\n') };
       } catch (error) {
         return { content: `读取失败：${error?.message ?? error}`, isError: true };
@@ -1113,11 +1409,10 @@ function registerStickerMemoryTools(api) {
 
   api.registerTool({
     id: 'forget_cached_image',
-    name: '忘掉某个图片的记忆',
+    name: '忘掉一条资料',
     description:
-      '把某张图从【表情包记忆库】里删掉，下次它再出现时会重新看图识别。'
-      + '什么时候用：群友说某个表情包记的含义完全不对、或者这个表情包改用法了，而你又不想现在就写新含义时。'
-      + 'query 传含义里的关键词（如「白旗」）就能定位到那条。',
+      '把一条图片或视频从【本地资料库】里删掉。下次再遇到同一份内容会重新看。'
+      + 'query 传描述里的关键词。',
     category: 'sticker',
     icon: '🗑️',
     parameters: {
@@ -1133,7 +1428,7 @@ function registerStickerMemoryTools(api) {
         const q = clean(args?.query, 40).toLowerCase();
         if (!q) return { content: '错误：请给一个关键词，例如「白旗」。', isError: true };
         const hits = [...store.entries.values()].filter((e) => String(e.note).toLowerCase().includes(q));
-        if (!hits.length) return { content: `记忆库里没有含义包含「${q}」的图，可能已经删过了。` };
+        if (!hits.length) return { content: `资料库里没有描述包含「${q}」的记录，可能已经删过了。` };
         if (hits.length > 5) {
           return {
             content: `关键词「${q}」匹配到 ${hits.length} 条，太宽了，请换个更具体的词。`
@@ -1144,7 +1439,7 @@ function registerStickerMemoryTools(api) {
         let removed = 0;
         for (const e of hits) { if (forgetEntry(keysOf(e))) removed += 1; }
         flushStore(true);
-        return { content: `已忘掉 ${removed} 条记忆：${hits.map((e) => e.note.slice(0, 20)).join(' / ')}。下次它们再出现会重新看图。` };
+        return { content: `已忘掉 ${removed} 条：${hits.map((e) => e.note.slice(0, 20)).join(' / ')}。下次再遇到会重新看。` };
       } catch (error) {
         return { content: `删除失败：${error?.message ?? error}`, isError: true };
       }
@@ -1156,14 +1451,15 @@ function registerStickerMemoryTools(api) {
 async function collectFreshKeys(st) {
   const out = [];
   const push = (keys) => {
-    for (const k of keys) if (!out.includes(k)) out.push(k);
+    for (const k of keys || []) if (k && !out.includes(k)) out.push(k);
   };
   for (const [, rec] of st.viewed) {
     if (!rec || nowMs() - rec.at > MIN_VIEW_LINK_MS) continue;
     if (rec.sticker) { push([`st:${rec.sticker}`]); continue; }
+    if (Array.isArray(rec.keys)) push(rec.keys);
     if (rec.localId) {
       const resolved = st.resolved.get(String(rec.localId));
-      if (resolved && Array.isArray(resolved.keys)) push(resolved.keys);
+      for (const item of resolvedItems(resolved)) push(item.keys);
     }
   }
   // 单次最多关联 24 个指纹（一次批量看图时够用，又不会把库撑爆）
@@ -1202,9 +1498,12 @@ export async function setup(api) {
 
   const c = conf();
   log(
-    `表情包记忆库已加载：${store.entries.size} 条记忆；`
-    + `同会话 ${c.recheckSameChatHours}h / 跨会话 ${c.recheckCrossChatDays} 天 内复用`
-    + `${c.stickerOnly ? '；只记表情包' : '；全部图片都尝试记'}；缓存放在 data/${PLUGIN_ID}/`
+    `本地资料库已加载：${store.entries.size} 条；`
+    + (c.autoForget ? `图片视频：自动遗忘开，早于 ${c.forgetDays} 天从最旧的开始删` : '图片视频：不自动遗忘')
+    + (c.hotTrendManaged
+      ? `；热梗：接管，上限 ${c.hotTrendMaxEntries}，${c.hotTrendAutoForget ? `早于 ${c.hotTrendForgetDays} 天开始删` : '不自动遗忘'}`
+      : '；热梗：不接管')
+    + `；数据在 data/${PLUGIN_ID}/`
   );
 }
 
@@ -1229,16 +1528,19 @@ export function dispose() {
   keyCache.clear();
   sessions.clear();
   stickerIndex.clear();
+  store.buckets.clear();
   store.entries.clear();
   store.byKey.clear();
   store.loadedAt = 0;
   onebotRef = null;
 }
 
+export const providers = {
+  'library.bucket': (args = {}) => libraryBucket(args)
+};
+
 /**
- * 排障/测试用。**故意不放进 providers**：`plugin-development.md` §5 说得很清楚，
- * 自建能力名核心不认识、也没人消费 —— 声明成 capability 只会被审计报成
- * "公开能力（暂无外部消费方）"。本插件的价值全在 hooks + 工具上。
+ * 排障/测试用。对外能力是 library.bucket，热梗插件用它读写自己那一格。
  */
 export const internals = {
   get size() { return store.entries.size; },
@@ -1247,6 +1549,10 @@ export const internals = {
   putEntry,
   forgetEntry,
   flushStore,
+  forgetExpired,
+  policyOf,
+  retainTopics,
+  libraryBucket,
   isLikelySticker,
   shortToolName,
   conf,

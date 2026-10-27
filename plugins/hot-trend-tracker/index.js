@@ -46,7 +46,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../../src/config.js';
 
-const BUILD_TAG = 'v1.0.0';
+const BUILD_TAG = 'v1.1.0';
 const STORE_FILE = path.join(DATA_DIR, 'hot-trends.json');
 const STORE_VERSION = 1;
 const SOURCE_ORDER = ['tieba', 'bilibili', 'baidu'];
@@ -83,8 +83,6 @@ const DEFAULTS = {
   sourceTieba: true,
   sourceBilibili: true,
   perSourceLimit: 20,
-  keepDays: 7,
-  maxTopics: 300,
   minDescriptionChars: 8,
   injectBrief: true,
   triggerWords: '热搜,热梗,什么梗,最近火,最近流行,最近的梗,网上都在说,新鲜事,新梗,吃瓜,出什么事了,发生什么了,out了',
@@ -98,6 +96,7 @@ const DEFAULTS = {
 // ───────────────────────────── 运行态（内存，重启即清） ─────────────────────────────
 
 const state = {
+  startupTimer: null,
   timer: null,
   running: false,        // 抓取进行中，防重入
   startedAt: Date.now(),
@@ -108,6 +107,37 @@ const state = {
   runCount: 0
 };
 
+let askLibrary = () => undefined;
+
+function libraryCall(action, extra = {}) {
+  try {
+    const out = askLibrary('library.bucket', { action, source: 'hot-trend-tracker', ...extra });
+    return out && typeof out === 'object' ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 上限和遗忘以本地资料库为准。资料库没接上时，沿用原来的 7 天 / 300 条。 */
+function retention() {
+  const remote = libraryCall('policy');
+  if (remote?.available) {
+    return {
+      managed: remote.managed === true,
+      autoForget: remote.managed === true && remote.autoForget === true,
+      forgetDays: Math.max(1, Math.round(num(remote.forgetDays, 7))),
+      maxTopics: Math.max(20, Math.round(num(remote.maxEntries, 300)))
+    };
+  }
+  return { managed: false, autoForget: true, forgetDays: 7, maxTopics: 300 };
+}
+
+function freshTopics(topics, policy, now = Date.now()) {
+  const list = Array.isArray(topics) ? topics : [];
+  if (!policy.autoForget) return list;
+  const maxAge = policy.forgetDays * 24 * 60 * 60 * 1000;
+  return list.filter((t) => now - num(t.lastSeenAt, 0) <= maxAge);
+}
 let cfg = () => ({});
 let log = () => {};
 let warn = () => {};
@@ -142,8 +172,6 @@ function settings() {
     sourceTieba: bool(s.sourceTieba, DEFAULTS.sourceTieba),
     sourceBilibili: bool(s.sourceBilibili, DEFAULTS.sourceBilibili),
     perSourceLimit: Math.max(5, Math.min(50, Math.round(num(pick('perSourceLimit'), DEFAULTS.perSourceLimit)))),
-    keepDays: Math.max(1, Math.min(60, Math.round(num(pick('keepDays'), DEFAULTS.keepDays)))),
-    maxTopics: Math.max(20, Math.min(2000, Math.round(num(pick('maxTopics'), DEFAULTS.maxTopics)))),
     minDescriptionChars: Math.max(0, Math.min(100, Math.round(num(pick('minDescriptionChars'), DEFAULTS.minDescriptionChars)))),
     injectBrief: bool(s.injectBrief, DEFAULTS.injectBrief),
     triggerWords: Array.isArray(s.triggerWords) ? s.triggerWords.join(',') : str(s.triggerWords, DEFAULTS.triggerWords),
@@ -216,28 +244,30 @@ const emptyStore = () => ({
   stats: { served: 0, injected: 0, collectRuns: 0, lastRunMs: 0 }
 });
 
-function loadStore() {
+function normalizeStore(parsed) {
+  const base = emptyStore();
+  if (!parsed || typeof parsed !== 'object') return base;
+  return {
+    ...base,
+    ...parsed,
+    sources: { ...base.sources, ...(parsed.sources || {}) },
+    stats: { ...base.stats, ...(parsed.stats || {}) },
+    topics: Array.isArray(parsed.topics) ? parsed.topics.filter((t) => t && t.title) : [],
+    collectedDays: Array.isArray(parsed.collectedDays) ? parsed.collectedDays.slice(-40) : []
+  };
+}
+
+function readStoreFile() {
   let raw = '';
   try {
     raw = fs.readFileSync(STORE_FILE, 'utf8');
   } catch {
-    return emptyStore();          // 首次运行：文件还不存在，正常
+    return emptyStore();
   }
   try {
     const s = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
-    const parsed = JSON.parse(s);
-    if (!parsed || typeof parsed !== 'object') throw new Error('不是对象');
-    const base = emptyStore();
-    return {
-      ...base,
-      ...parsed,
-      sources: { ...base.sources, ...(parsed.sources || {}) },
-      stats: { ...base.stats, ...(parsed.stats || {}) },
-      topics: Array.isArray(parsed.topics) ? parsed.topics.filter((t) => t && t.title) : [],
-      collectedDays: Array.isArray(parsed.collectedDays) ? parsed.collectedDays.slice(-40) : []
-    };
+    return normalizeStore(JSON.parse(s));
   } catch (error) {
-    // 损坏时不能让整个插件挂掉：备份坏文件，从空库继续（下次抓取自然重建）
     const bad = `${STORE_FILE}.bad-${Date.now()}`;
     try { fs.renameSync(STORE_FILE, bad); } catch { /* 备份失败也要继续 */ }
     warn(`知识库文件损坏，已备份为 ${path.basename(bad)} 并重建：${error?.message ?? error}`);
@@ -245,17 +275,31 @@ function loadStore() {
   }
 }
 
-function saveStore(store) {
+function writeStoreFile(store) {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     const tmp = `${STORE_FILE}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(store, null, 1), 'utf8');
-    fs.renameSync(tmp, STORE_FILE);      // 原子替换：半截文件不会被读到
+    fs.renameSync(tmp, STORE_FILE);
     return true;
   } catch (error) {
     warn(`写入知识库失败：${error?.message ?? error}`);
     return false;
   }
+}
+
+function loadStore() {
+  const remote = libraryCall('load');
+  if (remote?.available && remote.store) return normalizeStore(remote.store);
+  const local = readStoreFile();
+  if (remote?.available && local.topics.length) libraryCall('save', { store: local });
+  return local;
+}
+
+function saveStore(store) {
+  const remote = libraryCall('save', { store });
+  if (remote?.available) return remote.ok !== false;
+  return writeStoreFile(store);
 }
 
 // ───────────────────────────── 三个来源 ─────────────────────────────
@@ -483,8 +527,9 @@ async function runCollect({ reason, s }) {
   const report = mergeTopics(store, incoming, s, now);
 
   // ── 保鲜期与上限 ──
+  const policy = retention();
   const before = store.topics.length;
-  store.topics = pruneTopics(store.topics, s, now);
+  store.topics = pruneTopics(store.topics, policy, now);
   const pruned = before - store.topics.length;
 
   store.updatedAt = now;
@@ -601,10 +646,16 @@ function sourceScore(item) {
 }
 
 /** 保鲜期 + 总量上限。 */
-function pruneTopics(topics, s, now) {
-  const maxAge = s.keepDays * 24 * 60 * 60 * 1000;
-  const alive = topics.filter((t) => now - num(t.lastSeenAt, num(t.firstSeenAt, now)) <= maxAge);
-  if (alive.length <= s.maxTopics) return alive;
+function pruneTopics(topics, policy, now = Date.now()) {
+  const autoForget = policy?.autoForget === true || (policy?.autoForget === undefined && num(policy?.keepDays, 0) > 0);
+  const days = num(policy?.forgetDays ?? policy?.keepDays, 7);
+  const maxTopics = num(policy?.maxTopics ?? policy?.maxEntries, 300);
+  let alive = topics;
+  if (autoForget && days > 0) {
+    const maxAge = days * 24 * 60 * 60 * 1000;
+    alive = topics.filter((t) => now - num(t.lastSeenAt, num(t.firstSeenAt, now)) <= maxAge);
+  }
+  if (alive.length <= maxTopics) return alive;
   // 超上限：按"新鲜度 + 热度"排序，留最好的
   const scored = alive
     .map((t) => ({
@@ -612,7 +663,7 @@ function pruneTopics(topics, s, now) {
       v: num(t.score, 0) + 1 / (1 + (now - num(t.lastSeenAt, now)) / (24 * 60 * 60 * 1000))
     }))
     .sort((a, b) => b.v - a.v)
-    .slice(0, s.maxTopics)
+    .slice(0, maxTopics)
     .map((x) => x.t);
   return scored;
 }
@@ -640,7 +691,11 @@ function notify(chatKey, report, store, sourceReport) {
         + '已跳过通知，知识库本身不受影响。');
       return;
     }
-    const text = `热梗库更新完了：新增 ${report.added} 条、共 ${store.topics.length} 条（保鲜 ${settings().keepDays} 天）。${sourceReport}`;
+    const policy = retention();
+    const keep = policy.managed
+      ? (policy.autoForget ? `本地资料库接管，早于 ${policy.forgetDays} 天的会删` : '本地资料库接管，不自动遗忘')
+      : '未交给本地资料库';
+    const text = `热梗库更新完了：新增 ${report.added} 条、共 ${store.topics.length} 条（${keep}）。${sourceReport}`;
     Promise.resolve(entry.sender.sendTextBatch(key, [text]))
       .then((r) => log(`已通知 ${key}：发出 ${r?.sent?.length ?? 0} 条`))
       .catch((e) => warn(`发送通知失败：${e?.message ?? e}`));
@@ -690,6 +745,10 @@ function stopTimer() {
     clearInterval(state.timer);
     state.timer = null;
   }
+  if (state.startupTimer) {
+    clearTimeout(state.startupTimer);
+    state.startupTimer = null;
+  }
 }
 
 // ───────────────────────────── 查询 / 维护接口（导出给技能用） ─────────────────────────────
@@ -699,7 +758,6 @@ function stopTimer() {
  * @param {{query?:string, limit?:number, sinceDays?:number, includeStale?:boolean}} args
  */
 export function query(args = {}) {
-  const s = settings();
   const store = loadStore();
   const now = Date.now();
   const limit = Math.max(1, Math.min(50, Math.round(num(args.limit, 12))));
@@ -707,8 +765,8 @@ export function query(args = {}) {
   const sinceDays = num(args.sinceDays, 0);
   const cutoff = sinceDays > 0 ? now - sinceDays * 24 * 60 * 60 * 1000 : 0;
 
-  // 默认只给"还在保鲜期内"的：过期的等于旧闻，喂给模型只会让它说过时的话
-  const fresh = store.topics.filter((t) => now - num(t.lastSeenAt, 0) <= s.keepDays * 24 * 60 * 60 * 1000);
+  const policy = retention();
+  const fresh = freshTopics(store.topics, policy, now);
   let list = cutoff ? fresh.filter((t) => num(t.lastSeenAt, 0) >= cutoff) : fresh;
 
   if (q) {
@@ -745,7 +803,8 @@ export function query(args = {}) {
     returned: picked.length,
     lastCollectedAt: store.lastCollectedAt,
     lastCollectedText: store.lastCollectedAt ? bjClock(store.lastCollectedAt) : '从未',
-    keepDays: s.keepDays,
+    keepDays: policy.autoForget ? policy.forgetDays : 0,
+    managedByLibrary: policy.managed,
     topics: picked.map((t) => ({
       title: t.title,
       desc: descChars > 0 ? flatten(t.desc, descChars) : '',
@@ -761,8 +820,10 @@ export function query(args = {}) {
 export function brief({ limit = 5, maxChars = 480, descChars = null } = {}) {
   const s = settings();
   const descLimit = descChars === null || descChars === undefined ? s.briefDescChars : num(descChars, s.briefDescChars);
+  const policy = retention();
+  const freshNote = policy.autoForget ? `早于 ${policy.forgetDays} 天的不列入` : '不自动遗忘';
   const res = query({ limit: Math.max(1, Math.min(20, Math.round(num(limit, s.hookCount)))), descChars: descLimit });
-  if (!res.returned) return { ok: true, text: '', count: 0, reason: res.total ? '知识库里没有还在保鲜期内的话题' : '知识库还是空的' };
+  if (!res.returned) return { ok: true, text: '', count: 0, reason: res.total ? '知识库里没有还在有效期内的话题' : '知识库还是空的' };
   const lines = [];
   let used = 0;
   let count = 0;
@@ -775,7 +836,7 @@ export function brief({ limit = 5, maxChars = 480, descChars = null } = {}) {
     count += 1;
   }
   const text = count
-    ? `【最近网上的热点（本地知识库，${res.lastCollectedText} 更新，共 ${res.fresh} 条在保鲜期）】\n${lines.join('\n')}`
+    ? `【最近网上的热点（本地资料库，${res.lastCollectedText} 更新，${res.fresh} 条，${freshNote}）】\n${lines.join('\n')}`
     : '';
   if (count) {
     const store = loadStore();
@@ -793,9 +854,11 @@ export function status() {
   const s = settings();
   const store = loadStore();
   const now = Date.now();
-  const fresh = store.topics.filter((t) => now - num(t.lastSeenAt, 0) <= s.keepDays * 24 * 60 * 60 * 1000);
+  const policy = retention();
+  const fresh = freshTopics(store.topics, policy, now);
   let bytes = 0;
-  try { bytes = fs.statSync(STORE_FILE).size; } catch { /* 文件不存在 */ }
+  const storeFile = policy.managed ? path.join(DATA_DIR, 'sticker-memory', 'cache.json') : STORE_FILE;
+  try { bytes = fs.statSync(storeFile).size; } catch { /* 文件不存在 */ }
   const srcRows = {};
   for (const key of SOURCE_ORDER) {
     const health = store.sources[key] || {};
@@ -819,12 +882,13 @@ export function status() {
     ok: true,
     buildTag: BUILD_TAG,
     enabled: s.enabled,
-    storeFile: STORE_FILE,
+    storeFile,
     bytes,
     total: store.topics.length,
     fresh: fresh.length,
-    keepDays: s.keepDays,
-    maxTopics: s.maxTopics,
+    keepDays: policy.autoForget ? policy.forgetDays : 0,
+    maxTopics: policy.maxTopics,
+    managedByLibrary: policy.managed,
     lastCollectedText: store.lastCollectedAt ? bjClock(store.lastCollectedAt) : '从未',
     lastCollectedDay: store.lastCollectedDay || '',
     nextRunText: nextCheck,
@@ -867,6 +931,27 @@ export function setup(api) {
   if (typeof api?.config === 'function') cfg = api.config;
   if (typeof api?.log === 'function') log = api.log;
   if (typeof api?.warn === 'function') warn = api.warn;
+  if (typeof api?.capability === 'function') askLibrary = api.capability.bind(api);
+  api.registerTool({
+    id: 'hot_brief',
+    name: '查本地热梗',
+    category: 'query',
+    icon: '📰',
+    description: '查本地资料库里已经抓到的热梗和热点。query 可空，空着就给最新的几条。这是本地记录，不是现场新闻，拿不准的细节不要编。不要把整份清单主动发到群里。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '可选，标题或简介里的词。' },
+        limit: { type: 'integer', description: '最多几条，1~20，默认 8。' }
+      }
+    },
+    async execute(_ctx, args = {}) {
+      const res = query({ query: args.query, limit: args.limit || 8, descChars: 200 });
+      if (!res.returned) return { content: res.total ? '资料库里没有还在有效期内的相关热梗。' : '热梗资料还是空的。' };
+      const lines = res.topics.map((t) => `- ${t.title}${t.desc ? `：${t.desc}` : ''}`);
+      return { content: lines.join('\n') };
+    }
+  });
   log(`热梗事件收集已就绪（${BUILD_TAG}）｜来源：${activeSources(settings()).map((k) => SOURCE_LABEL[k]).join('、') || '无'}`);
 }
 
@@ -879,16 +964,21 @@ export function activate() {
     return;
   }
   if (s.catchUpOnStart) {
-    const store = loadStore();
-    const { due, why } = shouldRunNow(s, store);
-    if (due) {
-      // 延迟 8 秒再抓：别和启动抢 IO（与 conversation-memory 的巩固任务同一约定）
-      setTimeout(() => {
-        log(`启动时补抓（${why}）`);
-        collect({ reason: 'startup' }).catch((e) => warn(`启动补抓失败：${e?.message ?? e}`));
-      }, 8000).unref?.();
+    if (!libraryCall('policy')?.available) {
+      log('本地资料库还没接上，启动补抓交给后面的定时检查');
     } else {
-      log(`启动检查：${why}`);
+      const store = loadStore();
+      const { due, why } = shouldRunNow(s, store);
+      if (due) {
+        state.startupTimer = setTimeout(() => {
+          state.startupTimer = null;
+          log(`启动时补抓（${why}）`);
+          collect({ reason: 'startup' }).catch((e) => warn(`启动补抓失败：${e?.message ?? e}`));
+        }, 8000);
+        state.startupTimer.unref?.();
+      } else {
+        log(`启动检查：${why}`);
+      }
     }
   }
 }

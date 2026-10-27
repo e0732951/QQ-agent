@@ -1,0 +1,40 @@
+{
+  "id": "bilibili-qq-video",
+  "name": "看群里的B站小程序视频",
+  "version": "1.2.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "群里用 QQ 小程序转发的 B站视频，按当前的看视频方式（现在是抽帧）看完。看完立刻删掉视频和截图，文字描述一直留着，下次同一条只读描述。",
+  "author": "本机定制",
+  "entry": "index.js",
+  "permissions": [],
+  "enabledByDefault": true,
+  "capabilities": [
+    "message.bilibili-card",
+    "video.fetch-bilibili",
+    "video.bilibili-discard"
+  ],
+  "requires": [],
+  "settings": {
+    "cookie": "",
+    "maxMinutes": 15,
+    "maxMb": 120
+  },
+  "configSchema": {
+    "cookie": {
+      "type": "string",
+      "label": "B站 Cookie（可选）",
+      "description": "留空也能下到较低清晰度。要更接近 1080p，可填浏览器里的 SESSDATA，或整段 Cookie。只用于向 B站要播放地址，不会发到群里。"
+    },
+    "maxMinutes": {
+      "type": "number",
+      "label": "最长看几分钟",
+      "description": "超过此时长的视频不下载。默认 15。"
+    },
+    "maxMb": {
+      "type": "number",
+      "label": "最大体积（MB）",
+      "description": "下载超过这个大小就停。默认 120。抽帧本身另有清晰度上限。"
+    }
+  }
+}

@@ -167,9 +167,18 @@ export class VideoReader {
   async probe(media, { count = 0 } = {}) {
     const cfg = getConfig();
     const out = { note: '', route: 'meta', routeReason: '' };
+    const bili = media?.source === 'bilibili-miniapp' || Boolean(media?.bvid);
+    let filePath = null;
 
     // 1. 拿到视频文件（本地缓存优先，其次下载 url）
-    const filePath = await this.#localize(media).catch(() => null);
+    const located = await this.#localize(media).catch(() => null);
+    if (located && typeof located === 'object' && located.remembered) {
+      out.routeReason = '保存期内已有描述，不再下载';
+      out.note = `这条 B站视频在保存期内看过，视频和截图已经删了。当时记下的描述：\n${located.description}`;
+      return out;
+    }
+    filePath = typeof located === 'string' ? located : null;
+    try {
     const hasFile = Boolean(filePath && fs.existsSync(filePath));
 
     if (hasFile) {
@@ -227,6 +236,31 @@ export class VideoReader {
 
     out.note = this.#buildNote(out, { hasFile });
     return out;
+    } finally {
+      if (bili && filePath) {
+        const hint = await this.#discardBilibili(media, filePath, out.frames?.length || 0);
+        if (hint) out.note += `\n${hint}`;
+      }
+    }
+  }
+
+  /** B站小程序视频看完就删本地文件。抽帧图片由抽帧插件在交画面时删掉。 */
+  async #discardBilibili(media, filePath, frameCount) {
+    const providers = skillManager.getCapabilityProviders('video.bilibili-discard', {});
+    for (const p of providers) {
+      try {
+        const got = await p.fn({
+          filePath,
+          bvid: media?.bvid,
+          aid: media?.aid,
+          pageUrl: media?.pageUrl,
+          title: media?.title,
+          frameCount
+        });
+        if (got?.hint) return String(got.hint);
+      } catch { /* 删除失败不挡已抽出的画面 */ }
+    }
+    return '';
   }
 
   /** 说明文案：让模型知道它拿到的是什么形式的内容。 */
@@ -309,10 +343,33 @@ export class VideoReader {
     }
   }
 
-  /** 把视频落地为本地文件路径（OneBot 缓存 → 下载 url）。 */
+  /** 把视频落地为本地文件路径（OneBot 缓存 → B站小程序 → 下载 url）。 */
   async #localize(media) {
     // 路径 0：消息里直接给了本地 path
     if (media.path && fs.existsSync(String(media.path))) return String(media.path);
+    // 路径 0.5：QQ 小程序里的 B站视频。页面地址不是视频文件，交给插件解析后再抽帧。
+    if (media?.source === 'bilibili-miniapp' || media?.bvid || media?.pageUrl) {
+      const providers = skillManager.getCapabilityProviders('video.fetch-bilibili', {});
+      let lastErr = '';
+      for (const p of providers) {
+        try {
+          const got = await p.fn({
+            bvid: media.bvid,
+            aid: media.aid,
+            pageUrl: media.pageUrl,
+            title: media.title
+          });
+          if (got?.remembered && got.description) {
+            return { remembered: true, description: String(got.description), title: String(got.title || media.title || '') };
+          }
+          if (got?.filePath && fs.existsSync(String(got.filePath))) return String(got.filePath);
+          if (got?.error) lastErr = String(got.error);
+        } catch (error) {
+          lastErr = error?.message ?? String(error);
+        }
+      }
+      if (lastErr) throw new Error(lastErr);
+    }
     // 路径 1：OneBot get_video / get_file 拿缓存
     if (media.file) {
       for (const action of ['get_video', 'get_file', 'get_image']) {
