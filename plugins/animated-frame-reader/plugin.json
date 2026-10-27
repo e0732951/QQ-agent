@@ -1,17 +1,15 @@
 {
-  "id": "length-frame-reader",
-  "name": "按时长抽帧",
+  "id": "animated-frame-reader",
+  "name": "看动图",
   "version": "1.1.0",
   "apiVersion": 1,
   "category": "media",
-  "description": "看动图和视频时按设定的频率抽静帧给模型看。画面保持原清晰度，只有超过上限（默认 1080p，即横屏 1920×1080、竖屏 1080×1920）才缩小，小图不放大。视频走读取视频的抽帧路线；GIF 和动态 WebP 在看图时直接换成这些静帧。",
+  "description": "看 GIF 和动态 WebP 时按设定的频率抽静帧给模型看。画面保持原清晰度，只有超过上限（默认 1080p，即横屏 1920×1080、竖屏 1080×1920）才缩小，小图不放大。抽帧失败时退回原来的动图发送方式。",
   "author": "本机定制",
   "entry": "index.js",
   "permissions": [],
   "enabledByDefault": true,
   "capabilities": [
-    "video.frames",
-    "video.frames.available",
     "image.animated-frames"
   ],
   "requires": [],
