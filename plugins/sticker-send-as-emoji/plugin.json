@@ -1,21 +1,21 @@
 {
   "id": "sticker-send-as-emoji",
   "name": "表情包管理",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "apiVersion": 1,
   "category": "message",
   "entry": "index.js",
   "author": "本地自建",
   "enabledByDefault": true,
-  "permissions": [],
+  "permissions": ["web_fetch"],
   "capabilities": ["sticker.manage"],
-  "description": "统一管表情：发出去的是 QQ 表情（先存进收藏，再按小表情发，不再撑成大图）；可按喜好搜集群里的表情包；梗鲸的网络搜集和发送倾向也在这里设置。\n\n【发送】所有走「发表情」的场景（自己的表情库、梗鲸配图）都会先调用 QQ 的 add_custom_face 存成自己的表情，再带 sub_type=1 发出。同一张图只入库一次。入库失败仍按表情发出，不会改回大图。普通发图（send_image）不受影响。\n\n【群内搜集】打开后，模型看到群里的表情包，会按下面的风格关键词（留空就按它自己的喜好）决定要不要收藏。截图、照片、广告图不收。\n\n【网络搜集 / 发送倾向】原来「回复配图·梗鲸表情包」里的参数挪到这里。检索和发送仍由梗鲸技能执行，它会读取本插件的设置。",
+  "description": "统一管表情：发出去的是 QQ 表情（先存进收藏，再按小表情发，不再撑成大图）；可按喜好搜集群里的表情包；梗鲸的网络搜集和发送倾向也在这里设置。\n\n【发送】所有走「发表情」的场景（自己的表情库、梗鲸配图）都会先调用 QQ 的 add_custom_face 存成自己的表情，再带 sub_type=1 发出。同一张图只入库一次。入库失败仍按表情发出，不会改回大图。普通发图（send_image）不受影响。\n\n【群内搜集】打开后，模型看到群里的表情包，会按下面的风格关键词（留空就按它自己的喜好）决定要不要收藏。截图、照片、广告图不收。\n\n【网络搜集 / 发送倾向】梗鲸的搜集和发送都在本插件里，技能列表不再单独出现「回复配图·梗鲸表情包」。模型用 sticker-send-as-emoji__find_meme 选图，再用 sticker-send-as-emoji__send_meme 发出。",
   "settings": {
     "enabled": true,
     "subType": 1,
     "debug": false,
     "groupCollect": false,
-    "styleKeywords": "",
+    "styleWords": "",
     "networkEnabled": true,
     "character": "DeepSeek",
     "minShortSide": 160,
@@ -51,7 +51,7 @@
       "label": "群内搜集",
       "description": "默认关。打开后，模型会按自己的喜好、并结合下面的风格关键词，收藏群里看到的表情包。照片和截图不收。"
     },
-    "styleKeywords": {
+    "styleWords": {
       "type": "string",
       "label": "偏好风格关键词",
       "description": "群内搜集打开时使用。用逗号或空格分开，例如：可爱, 吐槽, 鲸鱼。留空则完全按模型自己的喜好决定收不收。"

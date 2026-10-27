@@ -186,7 +186,7 @@ function settings() {
     promptText: str('promptText'),
     promptLang: str('promptLang', 'zh') || 'zh',
     textLang: str('textLang', 'auto') || 'auto',
-    voiceMode: ['auto', 'all', 'off'].includes(str('voiceMode', 'all')) ? str('voiceMode', 'all') : 'all',
+    voiceMode: normalizeVoiceMode(str('voiceMode', 'all')),
     maxChars: clampNum(c.maxChars, 60, 1, 500),
     minChars: clampNum(c.minChars, 1, 1, 500),
     speedFactor: clampNum(c.speedFactor, 1, 0.5, 2),
@@ -513,8 +513,36 @@ function isActive() {
   return false;
 }
 
+/** 强/中/弱都由模型在句首写「【语音】」决定；差别只在提示词催得多紧。旧的 auto 等于中。 */
+const MARKED_MODES = new Set(['强', '中', '弱']);
+
+function normalizeVoiceMode(raw) {
+  const value = String(raw || '').trim();
+  if (value === 'auto') return '中';
+  if (MARKED_MODES.has(value) || value === 'all' || value === 'off') return value;
+  return 'all';
+}
+
+function modeLabel(mode) {
+  if (mode === '强') return '强（能念就念）';
+  if (mode === '中') return '中（看情况）';
+  if (mode === '弱') return '弱（很少念）';
+  if (mode === 'off') return '不发语音';
+  return '一直发语音';
+}
+
+function voicePrompt(mode) {
+  const how = {
+    '强': '能念的尽量念。短句、接话、吐槽、带情绪的话，都在那一条最前面写「【语音】」。只有链接、长解释、代码、清单不念。',
+    '中': '看情况念。短句、接话、吐槽适合语音；链接、长解释、代码不要念。不是每条都要念。',
+    '弱': '很少念。只有这句话靠语气才说得清，或者对方在让你开口、聊声音时，才在最前面写「【语音】」。平时打字。'
+  }[mode];
+  if (!how) return '';
+  return `你可以自己决定某一条回复用语音说还是打字。${how}想念出来时，在那一条的最前面写「【语音】」，后面紧跟要说的话。这个标记不会出现在聊天里。不加标记就只发文字。`;
+}
+
 /**
- * auto 档的可选标记。模型只在想发语音的那一条开头写它，发出去之前拿掉。
+ * 强/中/弱档的可选标记。模型只在想发语音的那一条开头写它，发出去之前拿掉。
  * 只认整条开头，避免正文里碰巧提到这个词就被念出来。
  */
 const VOICE_MARK = /^[\s\u200b]*【语音】\s*/u;
@@ -862,8 +890,8 @@ function installPatch() {
 
       const mode = settings().voiceMode;
       const intent = splitVoiceMark(text);
-      // off：一律文字。auto：没写标记的也是文字。标记本身不发给群。
-      if (mode === 'off' || (mode === 'auto' && !intent.marked)) {
+      // off：一律文字。强/中/弱：没写标记的也是文字。标记本身不发给群。
+      if (mode === 'off' || (MARKED_MODES.has(mode) && !intent.marked)) {
         const plain = intent.marked ? intent.text : text;
         return original.apply(this, plain && plain !== text ? [kind, id, plain, options] : args);
       }
@@ -944,10 +972,10 @@ export function setup(api) {
     return;
   }
   const self = probe(true);
-  const modeLabel = s.voiceMode === 'auto' ? '模型自己决定' : (s.voiceMode === 'off' ? '不发语音' : '一直发语音');
-  rtLog('加载', `已加载（${modeLabel}，上限 ${s.maxChars} 字，每分钟 ${s.maxPerMinute} 条，自动启动接口=${s.autoStartApi ? '开' : '关'}）`
+  const label = modeLabel(s.voiceMode);
+  rtLog('加载', `已加载（${label}，上限 ${s.maxChars} 字，每分钟 ${s.maxPerMinute} 条，自动启动接口=${s.autoStartApi ? '开' : '关'}）`
     + (self.ok ? '' : `；尚未配置好 → ${self.reason}`));
-  log(`已加载：文字回复 → 语音（${modeLabel}，API ${s.apiUrl}，上限 ${s.maxChars} 字，每分钟 ${s.maxPerMinute} 条）`
+  log(`已加载：文字回复 → 语音（${label}，API ${s.apiUrl}，上限 ${s.maxChars} 字，每分钟 ${s.maxPerMinute} 条）`
     + (self.ok ? '' : `；⚠️ 还没配置好 → ${self.reason}`));
 
   // 配置齐全 + 开关开着时，趁着空闲把语音接口先拉起来 —— 这样重启电脑后
@@ -991,12 +1019,13 @@ export function activate() {
 }
 
 export function promptSections() {
-  if (settings().voiceMode !== 'auto' || !probe().ok) return [];
+  const content = voicePrompt(settings().voiceMode);
+  if (!content || !probe().ok) return [];
   return [{
     id: 'sovits-voice-reply-mode',
     title: '语音回复',
     priority: 36,
-    content: '你可以自己决定某一条回复用语音说还是打字。想念出来时，在那一条的最前面写「【语音】」，后面紧跟要说的话。这个标记不会出现在聊天里。不加标记就只发文字。短句、接话、吐槽适合语音；链接、长解释、代码不要念。不是每条都要念。'
+    content
   }];
 }
 
@@ -1038,7 +1067,7 @@ export const providers = {
     }
     // 接口状态：从最近一次探测结果来（providers 必须同步，这里不能真去连端口）
     const mode = settings().voiceMode;
-    lines.push(['发送档位', mode === 'auto' ? '模型自己决定' : (mode === 'off' ? '不发语音' : '一直发语音')]);
+    lines.push(['发送档位', modeLabel(mode)]);
     lines.push(['语音接口', G.server.ok ? '已就绪' : (G.server.lastError ? '未就绪' : '未探测')]);
     if (!G.server.ok && G.server.lastError) lines.push(['接口原因', G.server.lastError]);
     // 开了"发完就删"就没有缓存这回事，别显示一个永远为 0 的计数让人以为坏了

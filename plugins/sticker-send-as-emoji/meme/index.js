@@ -159,7 +159,10 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
       // the end of user messages; sending must not rewrite the system prefix.
       const timing = !p.proactive ? '仅响应明确点图。' : p.hint;
       const max = integer(settings().maxCount, 3, 1, 3);
-      const content = timing + ` 点图默认 ${integer(settings().count, 1, 1, max)} 张，上限 ${max}；主动最多 1 张。`;
+      const guide = '图源按配置自动本地优先、缓存其次、网络兜底。开关、张数和强度在插件「表情包管理」里。发出去的是 QQ 表情，不是大图。'
+        + '候选 id 只传给 ' + FIND_TOOL + ' 的 ids；返回 prepared.ticket 后才可传给 ' + SEND_TOOL + ' 的 tickets，不能跳过准备。'
+        + 'reply 须先发完文字，最多 1 张；request 仅限明确要图。无合适素材不发。确认 sent>0 再结束，发送未确认不重试。';
+      const content = guide + timing + ` 点图默认 ${integer(settings().count, 1, 1, max)} 张，上限 ${max}；主动最多 1 张。`;
       return [{ id: 'reply-meme-current-intensity', title: '梗鲸表情使用时机', priority: 45, content }];
     }
   };

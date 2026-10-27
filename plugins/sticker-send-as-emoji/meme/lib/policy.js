@@ -1,5 +1,5 @@
-export const FIND_TOOL = 'reply-meme_1_2_0__find_meme';
-export const SEND_TOOL = 'reply-meme_1_2_0__send_meme';
+export const FIND_TOOL = 'sticker-send-as-emoji__find_meme';
+export const SEND_TOOL = 'sticker-send-as-emoji__send_meme';
 const LEVELS = { '0 · 不鼓励': 0, '1 · 偶尔': 1, '2 · 较积极': 2, '3 · 很积极': 3, low: 1, medium: 2, high: 3 };
 const NAMES = ['不鼓励', '偶尔', '较积极', '很积极'];
 const HINTS = [

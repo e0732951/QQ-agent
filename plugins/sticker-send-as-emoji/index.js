@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OneBotClient } from '../../src/onebot.js';
+import * as meme from './meme/index.js';
 
 const PATCHED = Symbol.for('qq-agent.sticker-send-as-emoji.patched');
 const IN_STICKER = Symbol.for('qq-agent.sticker-send-as-emoji.inSticker');
@@ -179,10 +180,10 @@ function uninstall() {
   origSendSegments = null;
 }
 
-export function promptSections() {
+function groupCollectSections() {
   const current = settings();
   if (!current.enabled || !current.groupCollect) return [];
-  const words = String(current.styleKeywords || '').trim();
+  const words = String(current.styleWords ?? current.styleKeywords ?? '').trim();
   const taste = words
     ? `优先收藏符合这些风格的：${words}。`
     : '没有填写风格关键词，按你自己的喜好决定收不收。';
@@ -192,7 +193,17 @@ export function promptSections() {
   }];
 }
 
-export function setup(api) {
+export function promptSections(ctx) {
+  const extra = typeof meme.promptSections === 'function' ? meme.promptSections(ctx) : [];
+  return [...groupCollectSections(), ...(Array.isArray(extra) ? extra : [])];
+}
+
+export const hooks = {
+  'before-llm-messages'(ctx) { return meme.hooks?.['before-llm-messages']?.(ctx); },
+  'after-response'(ctx) { return meme.hooks?.['after-response']?.(ctx); }
+};
+
+export async function setup(api) {
   if (typeof api?.config === 'function') cfg = api.config;
   if (typeof api?.log === 'function') log = api.log;
   if (typeof api?.warn === 'function') warn = api.warn;
@@ -203,10 +214,16 @@ export function setup(api) {
       ? `表情包管理已启用：发送前先存入 QQ 表情，再按表情发出（sub_type=${s.subType}）`
       : '表情包管理当前已关闭：表情仍按普通图片发送');
   }
+  if (typeof api?.registerTool === 'function') await meme.setup(api);
 }
 
-export function deactivate() { uninstall(); }
-export function dispose() { uninstall(); }
+export function activate() { meme.activate?.(); }
+
+export function deactivate() {
+  try { meme.deactivate?.(); } catch { /* 检索停不掉也不该挡住卸补丁 */ }
+  uninstall();
+}
+export function dispose() { deactivate(); }
 export function available() { return { ok: true }; }
 
 export const providers = {
