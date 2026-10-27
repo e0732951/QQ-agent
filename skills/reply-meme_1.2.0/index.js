@@ -30,7 +30,13 @@ export const dispose = () => runtime?.deactivate();
 // Optional dependencies are for isolated verification; the host passes only api.
 export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
   runtime?.deactivate();
-  const settings = () => api.config() || {};
+  const settings = () => {
+    const own = api.config() || {};
+    let host = null;
+    try { host = api.capability?.('sticker.manage'); } catch { host = null; }
+    const extra = host?.settings && typeof host.settings === 'object' ? host.settings : null;
+    return extra ? { ...own, ...extra } : own;
+  };
   const log = message => { try { api.log?.(message); } catch { /* optional logger */ } };
   const httpFetch = (...args) => {
     if (settings().networkEnabled === false) throw new Error('网络图源已关闭');
@@ -265,7 +271,7 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
       if (!args || typeof args !== 'object' || Array.isArray(args)) return result({ reason: '工具参数必须是对象。' }, true);
       const state = stateOf(ctx);
       const fail = reason => result({ sent: 0, reason }, true);
-      if (!state || !usable() || stopped(ctx.session) || typeof ctx.sender?.sendImage !== 'function') return fail('当前会话或发送工具不可用。');
+      if (!state || !usable() || stopped(ctx.session) || typeof ctx.sender?.sendSticker !== 'function') return fail('当前会话或发送工具不可用。');
       if (!['reply', 'request'].includes(args.mode) || !strings(args.tickets)) return fail('需要有效的 mode 和 tickets。');
       const proactive = args.mode === 'reply', tickets = [...new Set(args.tickets)];
       const max = integer(settings().maxCount, 3, 1, 3);
@@ -287,7 +293,14 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
           entry.used = true; // Ambiguous acknowledgements must never cause an automatic retry.
           entry.sending = true;
           try {
-            const reply = await ctx.sender.sendImage(ctx.chatKey, { file: entry.file }, { note: proactive ? '回复表情' : '梗鲸表情包' });
+            const file = String(entry.file || '');
+            const url = /^file:/i.test(file) ? file : `file:///${file.replace(/\\/g, '/')}`;
+            const reply = await ctx.sender.sendSticker(ctx.chatKey, {
+              id: entry.id || entry.ticket,
+              url,
+              desc: entry.item?.title || '梗鲸表情包',
+              localNote: entry.item?.title || ''
+            });
             if (reply === false || reply?.ok === false || reply?.success === false || reply?.isError === true) throw new Error('平台未确认发送');
           } catch (error) {
             state.uncertain = true;
@@ -297,10 +310,10 @@ export async function setup(api, { cacheDir = DEFAULT_DIR } = {}) {
           state.sent++;
           history.mark(ctx.chatKey, entry.item, proactive);
           sent.push({ title: entry.item.title, source: entry.item.page, width: entry.item.w, height: entry.item.h });
-          ctx.session?.sent?.push({ type: 'image', text: '[图片:梗鲸表情包]', at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
+          ctx.session?.sent?.push({ type: 'sticker', text: '[表情包:梗鲸表情包]', at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
           try { ctx.emit?.('session-update', ctx.session?.id); } catch { /* optional UI update */ }
         }
-        return result({ sent: sent.length, images: sent, message: sent.length ? '图片已发送，不重复发图，不汇报发送结果。可以正常结束，无须特定收尾工具。' : '状态已变化，没有发送。' }, sent.length === 0);
+        return result({ sent: sent.length, images: sent, message: sent.length ? '表情已按 QQ 表情发送，不重复发，不汇报发送结果。可以正常结束，无须特定收尾工具。' : '状态已变化，没有发送。' }, sent.length === 0);
       } catch (error) { return fail(`发送未完成：${error.message}`); }
       finally { state.busy = false; }
     }

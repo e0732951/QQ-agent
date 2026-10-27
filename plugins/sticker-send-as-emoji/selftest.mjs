@@ -1,5 +1,8 @@
-// 自测：验证「表情按表情发送」补丁是否真的生效，且不误伤发图/发文字。
+// 自测：验证表情先入库、再按表情发送，且不误伤发图/发文字。
 // 跑法（在 resources/app 下）：node plugins/sticker-send-as-emoji/selftest.mjs
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 //
 // 做法：不真连协议端 —— 造一个 OneBotClient 实例，把它的 call() 换成截获器，
 // 直接检查最终发给协议端的分段内容。
@@ -21,7 +24,12 @@ function makeClient() {
     onEvent: () => {}
   });
   c.captured = null;
-  c.call = async (action, params) => { c.captured = { action, params }; return { message_id: 7 }; };
+  c.calls = [];
+  c.call = async (action, params) => {
+    c.calls.push({ action, params });
+    c.captured = { action, params };
+    return { message_id: 7 };
+  };
   return c;
 }
 const imgSeg = (c) => (c.captured?.params?.message || []).find((s) => s?.type === 'image');
@@ -49,9 +57,32 @@ console.log('\n[2] 启用后：发表情带上 sub_type=1');
   const c = makeClient();
   await c.sendSticker('group', 123, 'http://x/y.jpg');
   check('图片段 sub_type', imgSeg(c)?.data?.sub_type, 1);
+  check('发送前先存入 QQ 表情', c.calls[0]?.action, 'add_custom_face');
+  check('入库地址保持原样', c.calls[0]?.params?.file, 'http://x/y.jpg');
   check('图地址未被改动', imgSeg(c)?.data?.file, 'http://x/y.jpg');
   check('动作仍是群发消息', c.captured.action, 'send_group_msg');
   check('群号正确', c.captured.params.group_id, 123);
+}
+
+console.log('\n[2b] 本地 file:/// 转成路径入库，同一张只入库一次');
+{
+  const faceFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../data/sticker-send-as-emoji/faces.json');
+  const existed = fs.existsSync(faceFile);
+  const before = existed ? fs.readFileSync(faceFile, 'utf8') : '';
+  const c = makeClient();
+  c.call = async (action, params) => {
+    c.calls.push({ action, params });
+    c.captured = { action, params };
+    if (action === 'add_custom_face') return { emoji_id: 'selftest-emoji' };
+    return { message_id: 7 };
+  };
+  await c.sendSticker('group', 123, 'file:///D:/pack/a.jpg');
+  check('file协议转成本地路径', c.calls[0]?.params?.file, 'D:\\pack\\a.jpg');
+  check('发出去仍是原地址', imgSeg(c)?.data?.file, 'file:///D:/pack/a.jpg');
+  await c.sendSticker('group', 123, 'file:///D:/pack/a.jpg');
+  check('同一张只入库一次', c.calls.filter((x) => x.action === 'add_custom_face').length, 1);
+  if (existed) fs.writeFileSync(faceFile, before);
+  else fs.rmSync(faceFile, { force: true });
 }
 
 console.log('\n[3] 不影响发图（sendImage 必须仍是普通图片）');
@@ -59,6 +90,7 @@ console.log('\n[3] 不影响发图（sendImage 必须仍是普通图片）');
   const c = makeClient();
   await c.sendImage('private', 456, 'http://x/pic.png');
   check('sendImage 的图片段无 sub_type', imgSeg(c)?.data?.sub_type, undefined);
+  check('普通发图不入库', c.calls.some((x) => x.action === 'add_custom_face'), false);
   check('动作是私聊发消息', c.captured.action, 'send_private_msg');
 }
 
@@ -87,6 +119,7 @@ console.log('\n[6] 关闭开关后立刻恢复旧行为');
   const c = makeClient();
   await c.sendSticker('group', 123, 'http://x/y.jpg');
   check('关闭后无 sub_type', imgSeg(c)?.data?.sub_type, undefined);
+  check('关闭后不入库', c.calls.some((x) => x.action === 'add_custom_face'), false);
   config = { enabled: true, subType: 1, debug: false };
 }
 

@@ -1,35 +1,127 @@
 {
   "id": "sticker-send-as-emoji",
-  "name": "表情按「表情」发（不再发成大图）",
-  "version": "1.0.0",
+  "name": "表情包管理",
+  "version": "2.0.0",
   "apiVersion": 1,
   "category": "message",
   "entry": "index.js",
   "author": "本地自建",
   "enabledByDefault": true,
   "permissions": [],
-  "capabilities": [],
-  "description": "让机器人发的表情**以「表情」的形式出现**（小图、可长按收藏），而不是一张撑满气泡的大图。\n\n【问题是什么】QQ 的消息里，图片分两种，靠一个叫 sub_type 的字段区分：sub_type=0 是普通图片（客户端按原图尺寸渲染，1080×1080 的表情库图就变成一张大图）；sub_type=1 才是「表情」（客户端按表情渲染，小而紧凑）。本项目发送表情的代码（src/onebot.js 的 sendSticker）只发了图片本体、**从来没有带过这个字段**，于是协议端一律按 0 处理 —— 这就是「机器人发表情等于发大图」的根因。\n\n【怎么确认的】不是猜的。用机器人收到过的真实消息回读协议端数据，对照如下：普通图片 [图片] → sub_type=0；好友发的收藏表情 [动画表情] → sub_type=1；商城表情（另有 emoji_id/emoji_package_id 的那类）→ sub_type=0 但带表情包字段。再实测发送：同一张图不带字段发出去，回读是 sub_type=0；带上 sub_type=1 发出去，回读就是 sub_type=1 —— 协议端确实接受并保留了它。\n\n【本插件做什么】在「发表情」这条路径上补上 sub_type=1。拦截点选在 OneBotClient.prototype.sendSticker（全项目发表情只有这一个出口：内置工具 send_sticker → sender.sendSticker → 这里，连它内部的多次失败重试也都走这里），所以一处生效、全覆盖。**只影响发表情**：sendImage（发一张图）和 sendText 都不动，图片依然是图片。\n\n【为什么是插件不是直接改核心】两点很实在：① src/ 是核心代码，改了要**重启应用**才生效；插件热重载**立即生效**。② 应用升级/覆盖安装会替换 resources/app，核心里的改动会**被冲掉**（表现是「用了一阵子又变大图了」，且毫无线索）；插件目录不在安装清单里，升级不丢。\n\n【安全性】不联网、不改任何文件、不碰协议连接。只在一个消息段的 data 里加一个数字字段，且加之前会检查是不是图片段、是否已经带了该字段（已有就不覆盖）。异常一律放行 —— 宁可这次发成图片，也绝不让机器人发不出表情。",
+  "capabilities": ["sticker.manage"],
+  "description": "统一管表情：发出去的是 QQ 表情（先存进收藏，再按小表情发，不再撑成大图）；可按喜好搜集群里的表情包；梗鲸的网络搜集和发送倾向也在这里设置。\n\n【发送】所有走「发表情」的场景（自己的表情库、梗鲸配图）都会先调用 QQ 的 add_custom_face 存成自己的表情，再带 sub_type=1 发出。同一张图只入库一次。入库失败仍按表情发出，不会改回大图。普通发图（send_image）不受影响。\n\n【群内搜集】打开后，模型看到群里的表情包，会按下面的风格关键词（留空就按它自己的喜好）决定要不要收藏。截图、照片、广告图不收。\n\n【网络搜集 / 发送倾向】原来「回复配图·梗鲸表情包」里的参数挪到这里。检索和发送仍由梗鲸技能执行，它会读取本插件的设置。",
   "settings": {
     "enabled": true,
     "subType": 1,
-    "debug": false
+    "debug": false,
+    "groupCollect": false,
+    "styleKeywords": "",
+    "networkEnabled": true,
+    "character": "DeepSeek",
+    "minShortSide": 160,
+    "poolSize": 4,
+    "cacheMinutes": 1440,
+    "promptCandidates": 3,
+    "localEnabled": false,
+    "localDirectory": "",
+    "autoReply": true,
+    "count": 1,
+    "cooldownSeconds": 60,
+    "maxCount": 3,
+    "intensity": "3 · 很积极"
   },
   "configSchema": {
     "enabled": {
       "type": "boolean",
-      "label": "启用",
-      "description": "默认**开**。关上后恢复原样：机器人发的表情又会变回撑满气泡的大图，方便你随时对比两种效果。"
+      "label": "启用表情包管理",
+      "description": "默认开。关上后不再把表情存进 QQ 收藏，也不再强制按小表情发送。"
     },
     "subType": {
       "type": "number",
       "label": "表情标记值（sub_type）",
-      "description": "默认 **1** = 按「表情」发送（小图、可长按收藏），这是正常人类发表情的形式，一般不用改。\n\n改成 0 就等于旧的「普通图片」行为（大图）。\n\n之所以做成可改：不同版本的协议端/客户端对这个字段的解释可能不同。万一你更新协议端后发现表情显示异常，可以先试着在这里改 0 验证是不是它引起的。"
+      "description": "默认 1，按「表情」发送（小图、可长按收藏）。改成 0 会变回普通大图。一般不用改。"
     },
     "debug": {
       "type": "boolean",
       "label": "调试日志",
-      "description": "默认**关**。打开后每次发表情都会记一行（原始分段 → 改写后的分段），排查「为什么这次没按表情发出去」时打开。"
+      "description": "默认关。打开后记录入库和发送标记，方便排查为什么某次没按表情发出去。"
+    },
+    "groupCollect": {
+      "type": "boolean",
+      "label": "群内搜集",
+      "description": "默认关。打开后，模型会按自己的喜好、并结合下面的风格关键词，收藏群里看到的表情包。照片和截图不收。"
+    },
+    "styleKeywords": {
+      "type": "string",
+      "label": "偏好风格关键词",
+      "description": "群内搜集打开时使用。用逗号或空格分开，例如：可爱, 吐槽, 鲸鱼。留空则完全按模型自己的喜好决定收不收。"
+    },
+    "networkEnabled": {
+      "type": "boolean",
+      "label": "网络表情包搜集",
+      "description": "默认开。从梗鲸（aigengtu.com）搜集表情。关掉后不再访问网络图源，只使用已打开的本地目录。"
+    },
+    "character": {
+      "type": "string",
+      "label": "网络搜集 · 角色筛选",
+      "description": "按梗鲸页面的角色名筛选，例如 DeepSeek。留空或 auto 表示不限定角色。",
+      "placeholder": "auto"
+    },
+    "minShortSide": {
+      "type": "number",
+      "label": "网络搜集 · 最短边（像素）",
+      "description": "默认 160。短边小于这个值时会在准备结果里标成偏小，由模型决定用不用。"
+    },
+    "poolSize": {
+      "type": "number",
+      "label": "网络搜集 · 候选池大小",
+      "description": "每次检索最多准备的候选数量，默认 4。"
+    },
+    "cacheMinutes": {
+      "type": "number",
+      "label": "网络搜集 · 缓存分钟",
+      "description": "网络索引和图片缓存的有效时间，默认 1440（一天）。"
+    },
+    "promptCandidates": {
+      "type": "number",
+      "label": "网络搜集 · 提示候选数",
+      "description": "放进提示里供模型挑选的候选条数，默认 3。"
+    },
+    "localEnabled": {
+      "type": "boolean",
+      "label": "网络搜集 · 启用本地目录",
+      "description": "默认关。打开后优先按文件名检索本地图片，没有匹配再回退网络。"
+    },
+    "localDirectory": {
+      "type": "string",
+      "label": "网络搜集 · 本地目录",
+      "description": "本地表情目录的绝对路径。只在「启用本地目录」打开时使用。"
+    },
+    "autoReply": {
+      "type": "boolean",
+      "label": "发送倾向 · 允许主动配图",
+      "description": "默认开。关掉后只在别人明确要图时才发，不再自己配表情。"
+    },
+    "count": {
+      "type": "number",
+      "label": "发送倾向 · 点图默认张数",
+      "description": "别人明确要图时默认发几张，1 到 3。主动配图固定最多 1 张。"
+    },
+    "cooldownSeconds": {
+      "type": "number",
+      "label": "发送倾向 · 主动配图间隔（秒）",
+      "description": "同一会话两次主动配图的最短间隔，默认 60 秒，0 到 3600。别人明确点图不受这个限制。"
+    },
+    "maxCount": {
+      "type": "number",
+      "label": "发送倾向 · 单次最多张数",
+      "description": "一轮里最多发几张，1 到 3，默认 3。主动配图仍然最多 1 张。"
+    },
+    "intensity": {
+      "type": "enum",
+      "label": "发送倾向 · 回复配图强度",
+      "description": "主动配表情有多积极。选「不主动」等于不自己配图。",
+      "values": ["跟随聊天设置", "0 · 不鼓励", "1 · 偶尔", "2 · 较积极", "3 · 很积极", "0 · 不主动"]
     }
   }
 }
