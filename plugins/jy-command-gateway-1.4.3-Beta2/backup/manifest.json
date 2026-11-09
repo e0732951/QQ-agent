@@ -1,0 +1,75 @@
+{
+  "patchVersion": 6,
+  "files": {
+    "src/app.js": {
+      "backup": "src__app.js__app.js",
+      "originalSha256": "7c5087da44d647ac5fe30133456b411314be83280aa6022a615a0c90114dc261",
+      "firstBackedUpAt": "2026-09-23T12:16:55.085Z",
+      "patchedSha256": "48fe598117c8678276a506403c8b66658c8823e0634ac80ca633ec7fb70a27d9",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    },
+    "src/skills/manifest.js": {
+      "backup": "src__skills__manifest.js__manifest.js",
+      "originalSha256": "71f9787f99e025ca2dc8c58ee3d1bfa74cbf545647fb111f31d897e314791f68",
+      "firstBackedUpAt": "2026-09-23T12:54:32.972Z",
+      "patchedSha256": "fad3805829e83942b39edb1814f60062b25236e8dc71cd84c81f04125978f15a",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    },
+    "src/skills/manager.js": {
+      "backup": "src__skills__manager.js__manager.js",
+      "originalSha256": "b191170b40b41a2183b38d73a9b825c1767518ee83221cb4c64d153d4c73d07f",
+      "firstBackedUpAt": "2026-09-23T12:54:32.972Z",
+      "patchedSha256": "31f28585be7dc179313d28b92c1af1302cf7940cc434f014879aebe48b677785",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    },
+    "src/plugin-loader.js": {
+      "backup": "src__plugin-loader.js__plugin-loader.js",
+      "originalSha256": "7fc9e320d4046d07e20d17e1534713235b289801075a626995d51991fae5d14a",
+      "firstBackedUpAt": "2026-09-23T12:54:32.972Z",
+      "patchedSha256": "4d3597f0f33777ffb732fa89b86209c8c204c55a3bbc80ce59896a9c2429e0f0",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    },
+    "ui/app.js": {
+      "backup": "ui__app.js__app.js",
+      "originalSha256": "76d0e367b6b86740af39eb8b5090a66424bc5fa37e3c5e532926fd0f307d2b68",
+      "firstBackedUpAt": "2026-09-23T12:54:32.972Z",
+      "patchedSha256": "81749a8b3fe3e9f8ed8066becfcb499783c1d7ba8383b6d3112113061fa69c1f",
+      "appliedAt": "2026-10-03T14:11:49.943Z"
+    },
+    "electron/main.js": {
+      "backup": "electron__main.js__main.js",
+      "originalSha256": "2ecb3237d1e60a863035cb9f664980a861f98a57441b032c7f835253620785d9",
+      "firstBackedUpAt": "2026-09-23T12:54:32.972Z",
+      "patchedSha256": "f50c833d195b66cc3daa6e914e7fdd3b1c34c493598b6186468b31758e2cf175",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    },
+    "ui/app/00-core.js": {
+      "backup": "ui__app.js__00-core.js",
+      "originalSha256": "d81a9b359afaa2938ed3628d21ae605c7ad08cb20be991a98b6b9f41316191d4",
+      "firstBackedUpAt": "2026-11-03T04:13:34.251Z",
+      "patchedSha256": "6e62734cfc755f403bc97d8eb22f84ed6e798c4857c03e5d0bce47084d527e2c",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    },
+    "ui/app/06-settings-render.js": {
+      "backup": "ui__app.js__06-settings-render.js",
+      "originalSha256": "13ee1bb211e740f99d7bf3980612ba181cee86fd9cc749bce061da5dd7cf0e6d",
+      "firstBackedUpAt": "2026-11-03T04:13:34.251Z",
+      "patchedSha256": "13f9a8d4440ad3c8726ddc2c3e3b0d14eff5f8baab868f95bbf487653864e81a",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    },
+    "ui/app/08-modals.js": {
+      "backup": "ui__app.js__08-modals.js",
+      "originalSha256": "4b58c4866f1668e6f268724019610fd270f22e63ce4363f1678a32bbb0ba6157",
+      "firstBackedUpAt": "2026-11-03T04:13:34.251Z",
+      "patchedSha256": "7454d9f0c671cbb5024ee6b82878bcaf7d516491345d0dfc85f36eaa1ccec8dc",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    },
+    "ui/app/02-sse-sessions.js": {
+      "backup": "ui__app.js__02-sse-sessions.js",
+      "originalSha256": "9cd1e1ba8cabfb6487b280f2d03d53c14ec9d120c94ac9a3358287b024607b48",
+      "firstBackedUpAt": "2026-11-03T04:13:34.251Z",
+      "patchedSha256": "85a714fb43a2e6ab431e7c33fb5c8a5d7ba1d9099a182ccc7a07f95e72e4e684",
+      "appliedAt": "2026-11-03T04:13:34.251Z"
+    }
+  }
+}

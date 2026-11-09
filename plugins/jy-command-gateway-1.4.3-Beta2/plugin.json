@@ -1,0 +1,366 @@
+{
+  "id": "jy-command-gateway-1.4.3-Beta2",
+  "name": "指令前置",
+  "version": "jy-1.4.3-Beta2.3",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "京玉版适配版；同一份代码也支持 0.3.1~0.4.0。在消息进入会话之前拦截 /指令，按权限等级分发给对应的指令插件；没命中的消息照常走聊天流程。指令可在清单里声明「执行后放行」（passthrough）：执行完把消息按原文或改写后的文本放回正常聊天流程。自带 禁言 / 解禁 / 全体禁言 / 全体解禁 / 暂停 / 继续 / 抛骰子 / 猜拳 八条指令，并对外提供 ai.ask、search.web 等能力。\n⚠️ 启用后需要重启软件才生效：它要在核心文件里接一个调用点，而运行中的进程改不动已经加载的代码(停用该插件后会恢复原文件,也要重启生效)。要做子指令时，把本目录的 README.md 交给 AI。",
+  "author": "林枫灬寒霜",
+  "enabledByDefault": false,
+  "capabilities": [
+    "command.dispatch",
+    "ai.ask",
+    "search.web",
+    "search.images",
+    "session.control",
+    "schedule.cron",
+    "sticker.pick",
+    "moderation.check",
+    "persona.apply",
+    "command.mute",
+    "command.unmute",
+    "command.whole-mute",
+    "command.whole-unmute",
+    "command.pause",
+    "command.resume",
+    "command.dice",
+    "command.rps"
+  ],
+  "exposes": [
+    "ai.ask",
+    "search.web",
+    "search.images",
+    "session.control",
+    "schedule.cron",
+    "sticker.pick",
+    "moderation.check",
+    "persona.apply"
+  ],
+  "commands": [
+    {
+      "id": "mute",
+      "word": "禁言",
+      "capability": "command.mute",
+      "description": "在群里禁言某人（仅群聊；需要机器人是该群管理员，且不能禁言群主或管理员）。时间不写默认 30 分钟，纯数字按分钟算。",
+      "argsHint": "@用户 [时间=30分钟]",
+      "examples": ["/禁言 @张三", "/禁言 10001 10", "/禁言 @张三 2小时"],
+      "permission": 100000,
+      "timeoutMs": 15000
+    },
+    {
+      "id": "unmute",
+      "word": "解禁",
+      "capability": "command.unmute",
+      "description": "解除某人的禁言（仅群聊；需要机器人是该群管理员）。",
+      "argsHint": "@用户",
+      "examples": ["/解禁 @张三", "/解禁 10001"],
+      "permission": 100000,
+      "timeoutMs": 15000
+    },
+    {
+      "id": "whole-mute",
+      "word": "全体禁言",
+      "capability": "command.whole-mute",
+      "description": "开启全员禁言（仅群聊；需要机器人是该群管理员）。",
+      "argsHint": "",
+      "permission": 100000,
+      "timeoutMs": 15000
+    },
+    {
+      "id": "whole-unmute",
+      "word": "全体解禁",
+      "capability": "command.whole-unmute",
+      "description": "解除全员禁言（仅群聊；需要机器人是该群管理员）。",
+      "argsHint": "",
+      "permission": 100000,
+      "timeoutMs": 15000
+    },
+    {
+      "id": "pause",
+      "word": "暂停",
+      "capability": "command.pause",
+      "description": "暂停模型调用：之后的群消息不再交给模型回复，指令类功能照常可用；正在跑的那一轮不会被打断。发 /继续 恢复。",
+      "argsHint": "",
+      "permission": 100000,
+      "timeoutMs": 10000
+    },
+    {
+      "id": "resume",
+      "word": "继续",
+      "capability": "command.resume",
+      "description": "恢复模型调用。默认把暂停期间积压的消息接着处理，写「丢弃积压」就丢掉不处理。",
+      "argsHint": "[丢弃积压]",
+      "examples": ["/继续", "/继续 丢弃积压"],
+      "permission": 100000,
+      "timeoutMs": 15000
+    },
+    {
+      "id": "dice",
+      "word": "抛骰子",
+      "capability": "command.dice",
+      "description": "随机掷一个骰子，默认 6 面。",
+      "argsHint": "[面数=6]",
+      "examples": ["/抛骰子", "/抛骰子 20"],
+      "permission": 0,
+      "timeoutMs": 5000
+    },
+    {
+      "id": "rps",
+      "word": "猜拳",
+      "capability": "command.rps",
+      "description": "和机器人猜拳：不写参数就只让它出，写了石头/剪刀/布就分胜负。",
+      "argsHint": "[石头|剪刀|布]",
+      "examples": ["/猜拳", "/猜拳 石头"],
+      "permission": 0,
+      "timeoutMs": 5000
+    }
+  ],
+  "settingsUi": {
+    "id": "command",
+    "label": "指令前置",
+    "file": "settings-ui.js"
+  },
+  "requires": [],
+  "settings": {
+    "permissions": [
+      {
+        "qq": "default",
+        "level": 0
+      }
+    ],
+    "metaCommands": [
+      {
+        "id": "help",
+        "permission": 0,
+        "enabled": true
+      },
+      {
+        "id": "permission",
+        "permission": 1,
+        "enabled": true
+      }
+    ],
+    "prefix": "/",
+    "cooldownMs": 3000,
+    "privateEnabled": true,
+    "pauseStopsCommands": true,
+    "pauseExemptWords": "",
+    "defaultTimeoutMs": 30000,
+    "overrides": [],
+    "stats": {},
+    "moderation": {
+      "words": [],
+      "patterns": []
+    },
+    "recentCalls": [],
+    "patch": null
+  },
+  "configSchema": {
+    "permissions": {
+      "type": "internal",
+      "label": "权限表",
+      "description": "由设置页的「权限」表格管理：第一行固定「默认权限」（未在表里的 QQ 用它），其余行是 QQ 号 → 权限等级（0~100000）。"
+    },
+    "metaCommands": {
+      "type": "internal",
+      "label": "元指令权限",
+      "description": "由设置页的「元指令」小节管理：/帮助 与 /权限查询 各自的权限等级。"
+    },
+    "prefix": {
+      "type": "string",
+      "label": "指令前缀",
+      "description": "默认 /。例如改成 ! 后，指令写成 !天气 珠海。"
+    },
+    "cooldownMs": {
+      "type": "number",
+      "label": "冷却（毫秒）",
+      "description": "同一会话同一指令的最小间隔，避免连点刷屏；0 = 关闭。默认 3000。"
+    },
+    "privateEnabled": {
+      "type": "boolean",
+      "label": "私聊也响应",
+      "description": "关闭后只有群聊能触发指令。"
+    },
+    "pauseStopsCommands": {
+      "type": "internal",
+      "label": "暂停时静默全部指令",
+      "description": "由设置页的勾选框管理：机器人被 /暂停 时，指令一律「认领后什么都不做」（连 /帮助 也发不出来）——不回话、不进存档、恢复后模型也看不到。"
+    },
+    "pauseExemptWords": {
+      "type": "internal",
+      "label": "暂停时仍可用的指令词",
+      "description": "由设置页管理：暂停期间仍然有效的指令词，逗号分隔。**默认留空 = 全部静默**（连 /继续 也发不出来，只能去控制台点恢复）；想留后门就填「继续」。"
+    },
+    "defaultTimeoutMs": {
+      "type": "number",
+      "label": "默认超时（毫秒）",
+      "description": "指令插件没声明超时时用它，默认 30000；有声明的用声明值。"
+    },
+    "overrides": {
+      "type": "internal",
+      "label": "指令覆盖表",
+      "description": "插件清单里声明了指令就自动生效；这张表只存用户改过的地方（指令词、别名、权限等级、超时、停用）。"
+    },
+    "stats": {
+      "type": "internal",
+      "label": "调用统计",
+      "description": "`插件id:指令id` → { calls, lastAt }，由插件运行时写回。"
+    },
+    "moderation": {
+      "type": "internal",
+      "label": "内容检查规则",
+      "description": "给 moderation.check 能力用的关键词与正则；由设置页维护。"
+    },
+    "recentCalls": {
+      "type": "internal",
+      "label": "最近调用记录",
+      "description": "由插件自动记录，最多 20 条。"
+    },
+    "patch": {
+      "type": "internal",
+      "label": "核心补丁状态",
+      "description": "由插件在启用/停用时写回：state、冲突文件、是否需要重启。设置页顶部那一行就是它。"
+    }
+  },
+  "changelogNote": "changelog 是「指令前置」自定义的字段（非官方清单字段，核心不解析、仅作版本存档）。更早的改动见本目录 UPGRADE.md 与 docs/adr/。",
+  "changelog": [
+    {
+      "version": "jy-1.4.3-Beta2.3",
+      "date": "2026-09-23",
+      "notes": [
+        "按用户反馈调整暂停闸的语义：暂停时指令改成「认领后什么都不做」（handled:true 且不给 run），不再按普通消息放行",
+        "为什么改：handled:false 会把消息放进存档，恢复处理积压时模型可能对着一句 /帮助 回话 —— 等于指令没生效却还是留了痕迹。现在消息不存档、不建会话、不发消息，恢复后模型也看不到，彻底像没发生过",
+        "这与 /赞我 插件在暂停时的「静默」现在是同一种处理，两处行为一致",
+        "pauseExemptWords 默认从「继续」改为**空**：暂停后在 QQ 里发什么都没反应，只能去控制台点恢复。想留后门就在设置页那一栏填「继续」",
+        "设置页该栏的说明与占位符同步更新（占位符：留空 = 全部静默）"
+      ]
+    },
+    {
+      "version": "jy-1.4.3-Beta2.2",
+      "date": "2026-09-23",
+      "notes": [
+        "本机增量（非上游版本）：新增「暂停闸」—— 机器人被 /暂停 时，**指令一律不生效**（连 /帮助 都发不出来），消息按普通消息放行",
+        "起因：/暂停 的设计是「只暂停模型调用、指令照常可用」（否则没法用 /继续 唤醒），但实际用起来是「机器人明明暂停了，发指令照样回话」——娱乐指令尤其像噪音",
+        "放行方式与「权限不够」完全一致（handled:false），而暂停期间模型本来就不回话，所以用户看到的就是彻底安静；消息仍会进存档，与其它暂停期间的消息一视同仁",
+        "⚠️ 默认**豁免「继续」**：否则暂停之后就再也没法从 QQ 里唤醒机器人，只能去控制台点恢复。想彻底全静默就在设置页把「暂停时仍可用的指令词」清空",
+        "设置页新增两个控件：「暂停时静默全部指令」勾选框 + 「暂停时仍可用的指令词」输入框（配置键 pauseStopsCommands / pauseExemptWords）",
+        "实现只在插件侧（index.js 的 dispatchSelf 开头 + settings-ui.js 两个控件），**不需要重打核心补丁、不用重启**，保存插件即热重载生效",
+        "拦截者（intercept）不受影响：它们在指令之前被问，且本身不发消息（例：表情收藏）",
+        "读不到核心句柄时一律不拦 —— 宁可照常工作，也不要因为读不到暂停状态就把所有指令锁死"
+      ]
+    },
+    {
+      "version": "jy-1.4.3-Beta2.1",
+      "date": "2026-09-23",
+      "notes": [
+        "本机增量（非上游版本）：新增对外服务能力 search.images —— 帮指令插件复用核心的图搜，不必自己 import src/ 或重造一份",
+        "实现与核心的 search_images 工具**同一份**（web-search.js 的 searchImages：百度优先、Bing 兜底，含 cleanImageQuery 与 rankImageCandidates 排序），所以图源、相关性、过滤规则完全一致；区别只在「谁决定搜什么词」：工具版由模型决定，能力版由调用它的指令插件决定",
+        "dispatch 块的 makePluginHost() 增加 host.images(query, { limit, excludeUrls }) 一个口子（与 host.search 对称，同样只在被调用那一刻才 import 核心模块，不影响消息热路径）；services.js 增加 search.images 能力；capabilities / exposes 同步登记",
+        "支持 excludeUrls：调用方可以把本轮已发过的图传进来剔掉，避免连续两次搜到同一张",
+        "搜不到图**不算错误**：返回 { ok:true, images:[] }，由调用方决定文案（例如「没搜到」）",
+        "配套消费者：plugins/jy-search-image-command（发 /搜图 关键词 才搜图发图）。装上它之后，可以在「设置 → 模型工具」里取消勾选 search_images，让模型不再自主搜图",
+        "注意：本次改动落在**核心侧补丁块内容**里 → 打补丁后要重启一次软件才生效"
+      ]
+    },
+    {
+      "version": "jy-1.4.3-Beta2",
+      "date": "2026-09-23",
+      "notes": [
+        "修回归（朋友实测反馈）：软引用改造那一版把 host 上的 chat / search / personas 漏掉了 —— 原版 1.4.3 是有的。漏了之后 ai.ask / search.web / persona.apply 三条服务能力全挂，所有调 api.capability('ai.ask') 的插件都会中招（不止表情包）",
+        "按原样把三个口子加回 makePluginHost()（import('./llm.js') / web-search.js / personas.js，三个模块在各版核心里都在、导出名一致）；patch-test 现在断言 host 上必须带这三个函数，并新增 services-test.mjs 走正常路径 + 缺口子两条路",
+        "services.js 补护栏：核心里没有某个口子时（例：京玉版没有 reminders，schedule.cron 天然不可用）抛「这版核心没有提供「X」——这个能力在你这份核心上不可用」，而不是 Cannot read properties of undefined",
+        "id 与版本一起换（jy-1.4.3-Beta2）：插件广场按 id 唯一，同一上游版本的第二次适配上传必须换新 id；旧的 jy-command-gateway-1.4.3-Beta 已进 LEGACY_IDS，用户升级后权限表 / 指令覆盖表 / 调用统计会自动搬过来",
+        "本次改动落在**核心侧**（块内容）→ 升级后要重启一次软件才生效"
+      ]
+    },
+    {
+      "version": "jy-1.4.3-Beta",
+      "date": "2026-09-23",
+      "notes": [
+        "京玉版适配：id 与版本号一律带 jy- 前缀（插件广场按 id 唯一，所以换分支、换版本都要换 id）",
+        "消息入口的锚点换代：上游把「指令禁言」整块删了，锚点连注释一起消失（`maybeTriggerCommandMute` 也不存在了）。改用结构锚「ingestMessage 里、store.appendIncoming 之前」——语义与 0.4 的位置逐字对应",
+        "dispatch 挂两个候选落点，分别对应不同核心版本的存档行写法（京玉版 `const incoming = store.appendIncoming(…`；0.3.1/0.4.0 `store.appendIncoming(…, {`），所以这份插件仍然同时支持 0.3.1 / 0.4.0 / 京玉版 —— 有 _jy-dev/cross-version-test.mjs 三个版本各跑一遍盯着",
+        "补丁引擎升级到 v6：新增作用域锚（scope + 窗口内唯一）、依赖自检（needs，缺符号就拒绝写入并说明缺了谁）、落地前语法体检（node --check / vm.Script），reload-shortcut 由「Menu.setApplicationMenu(null); 全局不唯一」改为锁进 createWindow",
+        "另外 5 个挂在注释上的锚点一并换成代码行锚（注释是最容易被上游顺手改掉的东西）：plugin-assets / manifest-normalizers / status-fields / plugin-storage / loader-api",
+        "dispatch 块改成**软引用**：核心句柄一律从 pluginHost 取、调用处一律 ?.()，核心里没有的功能（reminders、指令禁言、链接转发）自动跳过而不是抛错；分发失败只记第一次日志，不再每条消息刷同一行",
+        "LEGACY_IDS 补上 command-gateway-1.4.3-Beta，用户从 0.4 那套配置迁过来能自动接上",
+        "修事故：界面侧栏菜单块写死了 menu.push(...)，而京玉版的变量叫 menuGroups → ReferenceError → 设置页整片空白。现在两个分支都认（typeof 兜住，都没有就什么都不做），并新增 _jy-dev/ui-smoke-test.mjs 把「设置页真能渲染」钉成回归",
+        "修引擎：原位升级时「摘旧块」原来无条件吃掉块前面的换行（假定块以空行开头），而 sidebar-menu 是直接贴在两行代码之间的 → 会把 `];` 与下一行并成一行 → 升级失败。改成看数据（只有上方确实是空行才吃），回归见 patch-test 第 9 节"
+        ,
+        "修事故：插件设置页的入口依赖 state.skills，而京玉版的设置页**不拉** /api/skills（0.4 有四处赋值）→ 永远看不到「指令前置」的配置页。现在块里自己补拉一次并重画侧栏（30 秒内只试一次）；界面冒烟测试已改成从「skills 为空」的真实起点验证",
+        "补测试：分发验收现在覆盖隐私模式的接入（普通私聊不认领 / 发 /隐私模式 人设被认领 / 会话期间每句都接 / 结束词被认领），并钉住「/帮助 只列 commands，拦截者不在里面」这条设计"
+        ,
+        "修回归（朋友实测反馈）：软引用改造那一版把 host 上的 chat / search / personas 漏掉了 —— 原版 1.4.3 是有的（见 0.4 那份 patch 文件），漏了之后 ai.ask / search.web / persona.apply 三条服务能力全挂，所有调 api.capability('ai.ask') 的插件都会中招。现在按原样加回 makePluginHost()，并新增 _jy-dev/services-test.mjs 钉住这三条",
+        "services.js 补护栏：核心里没有某个口子（例如京玉版已经没有 reminders，schedule.cron 在它上面天然不可用）时抛「这版核心没有提供「X」——这个能力在你这份核心上不可用」，而不是 Cannot read properties of undefined"
+      ]
+    },
+    {
+      "version": "1.4.3-Beta",
+      "date": "2026-09-23",
+      "notes": [
+        "修复「昵称含空格」时 @ 目标解析错位：成员取名 Death's End 时，/禁言 @Death's End 1 把昵称截断在第一个空格，余下的 \"End 1\" 被当成时长去解析 → 解析失败、禁言根本不执行。pickTarget 与 /禁言 的时长剥离正则改为「@ 后续词不以数字开头就并入昵称」，整段切出真昵称（时长参数都以数字开头，正好在那里收住）",
+        "修复前置艾特形式 @Death's End /禁言 1：剥前导 @ 时同样在空格处断掉，整条消息不被认成指令。改用指令前缀做「昵称到哪为止」的锚点（@Death's End /禁言 1 → 昵称 \"Death's End\" + 指令 /禁言 1），无后缀、多艾特、带 (QQ:…) 后缀的旧形态都不回归",
+        "新增 args.js 的 resolveMemberName：拿 at 段的 QQ 回问协议端 get_group_member_info 要真名（群名片 > 昵称，5 分钟缓存）—— 核心渲染 @昵称(QQ:…) 用的就是这条路，但它的缓存不开放给插件，插件只能自己问一次。/禁言、/解禁、/权限查询 的显示名与参数剥离都以协议确认的真名为准",
+        "顺带解决昵称含数字词的歧义（此前无解）：@Team 6 10 分不清 6 是名字还是分钟数，拿到真名后用新增的 stripTargetArg 精确剥掉 @Team 6，剩下 10 才是时长",
+        "真名查不到（没连接 / 协议报错 / 不在群里）一律回退到文本里抠出来的名字，不打断指令 —— 宁可显示名差点，也不能让查询失败把指令整条废掉",
+        "修正 /权限查询 的真名查询参数：分发 payload 上没有 chat 字段（核心只给 chatId/kind/chatKey），按 resolveMemberName 要的形状拼装，否则真名查询在真实链路里静默失效",
+        "README §7 补「拿不准 @ 了谁，就回协议端再问一次」的样板说明，插件作者可照抄",
+        "配套修复（另两个插件，同一病因）：speaker-identity 现在能给含空格昵称补 (QQ:…) 后缀（此前 @Death's End 渲染不出后缀，模型也分不清同名不同人）；privacy-mode 的同类前导 @ 剥离一并修好",
+        "id 带版本号 → LEGACY_IDS 补 command-gateway-1.4.2-Beta，老配置自动迁移",
+        "因为没有进行完全的测试,故设为beta版,如果有bug请联系我修复"
+      ]
+    },
+    {
+      "version": "1.4.2-Beta",
+      "date": "2026-09-23",
+      "notes": [
+        "侧栏菜单锚点改为结构锚点：挂在「渲染侧栏那条语句」上，用 menu.push(...) 把插件分区追加到菜单末尾 —— 与菜单里有哪些子页面无关，魔改版删项/加项/重排都不会再让补丁失效（此前锚点挂在菜单项上，少一项就整批补丁原子失败，表现为指令功能全废）",
+        "补丁升级语义改为「摘掉旧块 → 按当前锚点重新落点」：块内容换语法形态（数组项 → 语句）时，不再把语句塞回菜单数组、产出语法错误的文件",
+        "引擎加固：锚点**必须落在行首**（前面只有空白）才算命中 —— 文件被合并过行时（例如 `];  sidebar.innerHTML` 挤在一行）不会再在行中间命中、把语法改坏；这类文件会报 conflict（不打补丁、不写文件）。同时把两侧工作区里历史遗留的「行尾块」规范化回行首",
+        "新增两条回归：菜单被删项的魔改核心、位置敏感的旧块升级",
+        "README 补上「怎样声明依赖前置」：标准表新增 S14、新增 §7.1c，最小模板与完整示例的 requires 改成 [\"command.dispatch\"]，AI 自检清单加第 14 条"
+      ]
+    },
+    {
+      "version": "1.4.1-Beta",
+      "date": "2026-09-22",
+      "notes": [
+        "补齐 exposes 透出：status() 视图与 manifest 归一化都输出 exposes[]（0.4 的核心缺这两处，审计会把公开能力误判成孤儿能力）",
+        "LEGACY_IDS 补上 command-gateway-1.3.2（此前从该 id 迁配置会漏掉）",
+        "补丁测试不再把「存在但没被选中的候选文件」算进目标文件数",
+        "id 与 version 统一带 -Beta 预发布标记，author 统一"
+      ]
+    },
+    {
+      "version": "1.4.0",
+      "date": "2026-09-22",
+      "notes": [
+        "新增「执行后放行」（passthrough）：指令执行完可以把消息放回正常聊天流程 —— 按原文、去前缀、只放参数，或放一段改写后的文本；放行由核心调用点执行（存档用消息原始时间戳、媒体段原样保留、不重新过拦截链）",
+        "清单可声明 passthrough: \"original\" | \"prefix\" | \"args\" 或 { mode, onFail }；能力返回值的 passthrough: true | false | 字符串 优先级更高；执行失败默认不放行（onFail: \"release\" 可放宽）",
+        "补丁引擎 v4：旧版本块原位升级（标记在、块内容对不上时自动升级）",
+        "新增 ADR 0008：放行动作放核心、契约放返回值"
+      ]
+    },
+    {
+      "version": "1.3.1",
+      "date": "2026-09-20",
+      "notes": [
+        "适配 0.4.0 的拆分前端（ui/app/*.js）：补丁表支持「一个块多个候选挂点」，一份插件同时适配 0.3.1 与 0.4.0",
+        "id 采用带版本号的写法，旧 id 进 LEGACY_IDS，配置自动迁移"
+      ]
+    },
+    {
+      "version": "1.3",
+      "date": "2026-09-19",
+      "notes": [
+        "权限等级（0~100000 整数标尺）取代管理员布尔：权限表 + 默认权限行 + /权限查询",
+        "指令「声明即生效」：清单 commands[] 声明就能用，设置页那张表变成只存差异的覆盖表",
+        "元指令 /帮助 分页（每页 10 条、只列本人有权使用的指令）",
+        "拦截链：其它插件用 intercept + requires: [\"command.dispatch\"] 接入消息入口",
+        "自带 8 条指令：禁言 / 解禁 / 全体禁言 / 全体解禁 / 暂停 / 继续 / 抛骰子 / 猜拳",
+        "对外服务能力：ai.ask、search.web、session.control、schedule.cron、sticker.pick、moderation.check、persona.apply，以及插件数据目录 api.storage",
+        "补丁引擎：标记块 + 原子写入 + 备份/还原 + 不覆盖上游改动"
+      ]
+    }
+  ]
+}

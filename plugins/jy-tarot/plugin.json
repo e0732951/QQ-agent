@@ -1,0 +1,103 @@
+{
+  "id": "jy-tarot",
+  "name": "今日塔罗",
+  "version": "3.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "每日一次的塔罗抽牌：随机抽 1 张大阿卡纳（主 题）+ 1 张小阿卡纳（事 件）+ 1 张宫廷牌（另一维度），各判正逆位，合成一张图直接发到会话；另有独立的「抽签解读」，把签位与当日牌面组合成最终建议，并附一段宫廷牌指引。按 QQ 记账，每人每天一次。",
+  "author": "QQ Agent",
+  "enabledByDefault": false,
+  "capabilities": [
+    "command.tarot-today",
+    "command.tarot-luck",
+    "command.tarot-test",
+    "command.tarot-luck-test"
+  ],
+  "requires": [
+    "command.dispatch"
+  ],
+  "commands": [
+    {
+      "id": "今日塔罗",
+      "word": "今日塔罗",
+      "capability": "command.tarot-today",
+      "description": "抽今日塔罗：大阿卡纳（主题）+ 小阿卡纳（事件）+ 宫廷牌（另一维度）各一张并判正逆位，合成图片直接发到会话。只出牌面与含义，不给建议。每人每天一次，重复发送会重发今天已抽到的那三张。",
+      "argsHint": "",
+      "examples": ["今日塔罗"],
+      "permission": 0,
+      "timeoutMs": 120000
+    },
+    {
+      "id": "抽签解读",
+      "word": "抽签解读",
+      "capability": "command.tarot-luck",
+      "description": "在今日塔罗的基础上抽一支签：签位（凶/末吉/吉/中吉/大吉，各 20%）与当日所抽的大阿卡纳主题、小阿卡纳事件组合成最终建议，并在建议末尾附一段宫廷牌（另一维度）的指引，出图发到会话。必须先抽过今日塔罗。",
+      "argsHint": "",
+      "examples": ["抽签解读"],
+      "permission": 0,
+      "timeoutMs": 120000
+    },
+    {
+      "id": "测塔罗",
+      "word": "测塔罗",
+      "capability": "command.tarot-test",
+      "description": "内部测试通道：不记账、纯随机，可反复抽取，不受每日一次限制。可指定大阿卡纳/小阿卡纳/宫廷牌的牌号（或宫廷牌中文名）与正逆位。仅测试白名单内的人可用。",
+      "argsHint": "[大|小|宫] [牌号] [正|逆]",
+      "examples": [
+        "测塔罗",
+        "测塔罗 大 15",
+        "测塔罗 小 07 逆",
+        "测塔罗 宫 权杖王后 逆",
+        "测塔罗 大 15 逆 小 07 正 宫 03 逆"
+      ],
+      "permission": 0,
+      "timeoutMs": 120000
+    },
+    {
+      "id": "测抽签",
+      "word": "测抽签",
+      "capability": "command.tarot-luck-test",
+      "description": "内部测试通道：指定签位渲染抽签解读图（含宫廷指引），只用来验证能不能正常出图发送。需先抽过塔罗（测试通道不记账）。仅测试白名单内的人可用。",
+      "argsHint": "[凶|末吉|吉|中吉|大吉]",
+      "examples": ["测抽签 大吉", "测抽签 凶"],
+      "permission": 0,
+      "timeoutMs": 120000
+    }
+  ],
+  "settings": {
+    "testAllowList": "",
+    "testDenyText": "这条是内部测试指令，你不在测试名单里。",
+    "dailyLimit": 1,
+    "needTarotText": "抽取塔罗后才可抽签解读哦"
+  },
+  "settingsUi": {
+    "id": "tarot",
+    "label": "今日塔罗",
+    "file": "settings-ui.js"
+  },
+  "configSchema": {
+    "dailyLimit": {
+      "type": "number",
+      "min": 1,
+      "max": 9,
+      "label": "每人每日抽取上限",
+      "description": "默认 1（每天只能抽一次）。改成大于 1 可用于临时放开限制。"
+    },
+    "needTarotText": {
+      "type": "string",
+      "label": "未抽塔罗就发「抽签解读」的回执",
+      "description": "没抽过今日塔罗时，抽签解读会回这句话，并且不出图、不记账。"
+    },
+    "testAllowList": {
+      "type": "textarea",
+      "label": "测试通道白名单 QQ",
+      "rows": 3,
+      "description": "只有这里的人能用「/测塔罗」和「/测抽签」。留空 = 谁都不能用（正式指令不受影响）。多个用逗号或换行分隔。"
+    },
+    "testDenyText": {
+      "type": "string",
+      "label": "测试通道拒绝回执",
+      "description": "不在测试白名单时回的那句话（/测塔罗 与 /测抽签 共用）。"
+    }
+  }
+}
