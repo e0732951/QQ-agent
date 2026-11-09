@@ -270,11 +270,13 @@ export const DEFAULT_CONFIG = {
     // 连续触发时，把上一轮发给模型的【记忆】+【已读信息】前缀**原样复用**：
     // 本轮只在其后追加新沉淀的已读条目（"新已读信息"），新增群友的印象放到
     // 未读信息之后的【新加入成员】段 —— 除追加部分外前缀字节不变，命中缓存。
-    // 追加条数超过 maxExtraRead 就整体重置（回到标准窗口，重新开始锚定）：
-    // 已读信息是按条计费的，无限追加会"为了省钱花更多钱"。
+    // 追加条数超过 maxExtraRead，或出现新群友时，把新已读并进原来的已读基座，
+    // 前缀连续，不跳到最新窗口。基座超过 maxAnchorRead 才真正重开。
+    // maxAnchorRead 为 0 时跟随 2× historyCount（80 条历史 → 基座大约 160 条）。
     promptAnchor: {
       enabled: true,
-      maxExtraRead: 5           // 相对锚定时的已读条数，最多额外追加几条
+      maxExtraRead: 16,
+      maxAnchorRead: 0
     },
     // ── 响应档位的作用范围 ──
     unifiedTier: true,          // true = 上方滑条对所有会话生效；false = 可按群单独设置

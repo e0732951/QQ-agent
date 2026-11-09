@@ -1191,7 +1191,17 @@ export class Orchestrator {
         }
         this.sessions.update(session.id);
         this.emit('session-update', session.id);
-        if (name === 'finish') {
+        let wantsFinish = false;
+        if (name === 'send_message' && !result.isError) {
+          const sentArgs = safeParse(argsRaw);
+          wantsFinish = sentArgs.finish === true || sentArgs.finish === 'true';
+          if (wantsFinish) {
+            if (sentArgs.reason) session.finishReason = String(sentArgs.reason).slice(0, 300);
+            if (sentArgs.activeTopic) session.activeTopic = String(sentArgs.activeTopic).slice(0, 60);
+            finish = true;
+          }
+        }
+        if (name === 'finish' || wantsFinish) {
           finish = true;
           // ── 活跃模式状态机 ──
           // 模型 finish 时带回的 activeTopic / "话题结束" 决定活跃期走向：

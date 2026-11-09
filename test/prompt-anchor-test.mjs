@@ -3,8 +3,8 @@
 //   1. 首轮建立锚点（reset：滑窗全量成为锚点，追加预算从这之后起算）
 //   2. 后续轮**字节前缀不变**（记忆+已读信息原样复用），新内容进【新已读信息】，
 //      已读部分可超过 historyCount（锚点 + 追加 ≤ 锚点 + maxExtraRead）
-//   3. 追加超过 maxExtraRead → 整体重置回标准滑窗
-//   4. 新群友加入 → 锚点重置（记忆扩展必然改前缀），新成员印象进【新加入成员】
+//   3. 追加超过 maxExtraRead → 并入已读基座（前缀变长但连续），不跳最新滑窗
+//   4. 新群友加入 → 并入成员集，不跳窗口
 //   5. 锚点头滚出存档窗口（隔太久没触发）→ 重置
 //   6. 关闭开关 → 永远标准结构，锚点状态不写入
 // 纯离线：隔离数据目录 + MemoryStore/ChatStore 真实例。
@@ -31,7 +31,7 @@ cfg.persona.roleText = '你是测试群里的测试机。';
 cfg.sticker.enabled = false;   // 关掉表情包，减少无关段落
 cfg.store.contextTier = 4;
 cfg.store.historyCount = 5;    // 滑窗 5 条
-cfg.store.promptAnchor = { enabled: true, maxExtraRead: 2 };   // 追加预算 2
+cfg.store.promptAnchor = { enabled: true, maxExtraRead: 2, maxAnchorRead: 40 };   // 追加预算 2；基座上限放宽，避免短脚本提前重开
 setRuntimeConfig(cfg);
 
 const store = new ChatStore(0);
@@ -127,37 +127,36 @@ assert.ok(hasMsg(extraSec3, 'G') && hasMsg(extraSec3, 'H'), '新已读 = G、H�
 assert.equal(r3.session.pastStateCount, 7, '锚定轮 pastStateCount = 5 锚点 + 2 追加');
 const anchor3 = r3.session.promptAnchorState;
 
-// ═══ 轮 4：乙发 J（追加将超出预算 → 整体重置）═══
+// ═══ 轮 4：乙发 J（追加 G/H/I 共 3 条，超出预算 2 → 并入基座）═══
 const J = pushUnread('uB', '乙', 'J');
 const r4 = runOnce([J], anchor3);
-assert.equal(r4.session.promptAnchorMode, 'reset', '追加将超出 maxExtraRead → 整体重置');
-assert.ok(!r4.up.includes('【新已读信息】以下是'), '重置轮无新已读段');
-// 重置后回到标准滑窗（historyCount=5）：EFGHI
+assert.equal(r4.session.promptAnchorMode, 'anchored', '超出追加预算 → 并入基座，不跳窗口');
+assert.ok(!r4.up.includes('【新已读信息】以下是'), '并入轮不再单挂新已读段');
 const readSec4 = r4.up.slice(r4.up.indexOf('【已读信息】以下是'), r4.up.indexOf('【未读信息】以下是'));
-assert.ok(['E','F','G','H','I'].every((x) => hasMsg(readSec4, x)) && !hasMsg(readSec4, 'D'), '重置轮滑窗 = EFGHI');
-// 新锚点 = EFGHI，前缀从此重新锚定
-assert.equal(r4.session.promptAnchorState.readIds.length, 5, '重置后新锚点 = 新滑窗');
+assert.ok(['B','C','D','E','F','G','H','I'].every((x) => hasMsg(readSec4, x)), '并入后已读 = 旧基座 BCDEF + GHI');
+assert.equal(r4.session.promptAnchorState.readIds.length, 8, '新基座 = 5 + 3');
+assert.equal(r4.session.pastStateCount, 8, '并入轮 pastStateCount = 整段基座');
 const prefix4 = prefixOf(r4.up);
-assert.notEqual(prefix4, prefix1, '重置轮前缀必然不同（滑窗滚动）');
+assert.ok(prefix4.startsWith(prefix1.trimEnd()) || prefix4.includes(prefix1.slice(prefix1.indexOf('【已读信息】'))), '并入后的已读仍以旧基座开头');
 const anchor4 = r4.session.promptAnchorState;
 
-// ═══ 轮 5：甲发 K（重置后再次连续触发 → 新前缀保持）═══
+// ═══ 轮 5：甲发 K（并入后的下一轮，J 单独挂在新已读，前缀保持）═══
 const K = pushUnread('uA', '甲', 'K');
 const r5 = runOnce([K], anchor4);
-assert.equal(r5.session.promptAnchorMode, 'anchored', '重置后的下一轮连续触发应再次锚定');
-assert.equal(prefixOf(r5.up), prefix4, '新锚点的前缀同样逐字节一致');
+assert.equal(r5.session.promptAnchorMode, 'anchored', '并入后的下一轮继续锚定');
+assert.equal(prefixOf(r5.up), prefix4, '基座未再增长时前缀逐字节一致');
+assert.ok(r5.up.includes('【新已读信息】以下是') && hasMsg(r5.up.slice(r5.up.indexOf('【新已读信息】以下是')), 'J'), 'J 挂在新已读');
 
-// ═══ 场景 F：新群友加入话题 → 锚点重置 + 新成员印象进【新加入成员】段 ═══
-// 先从 anchor4 继续锚定一轮（无新成员），然后新群友丙发言
+// ═══ 场景 F：新群友加入话题 → 并入成员集，不跳窗口 ═══
 const L = pushUnread('uA', '甲', 'L');
 const rL = runOnce([L], r5.session.promptAnchorState);
 assert.equal(rL.session.promptAnchorMode, 'anchored', '甲继续发言应保持锚定');
 const anchorL = rL.session.promptAnchorState;
 const M = pushUnread('uC', '丙', 'M');   // 丙首次发言（记忆里有印象但不在锚点成员集）
 const rM = runOnce([M], anchorL);
-assert.equal(rM.session.promptAnchorMode, 'reset', '新群友加入 → 重置（记忆段必须扩展）');
-// 重置后丙进锚点成员集 → 记忆段含丙；下一轮丙再发言可继续锚定
-assert.ok(rM.session.promptAnchorState.memberIds.includes('uC'), '重置后丙进入锚点成员集');
+assert.equal(rM.session.promptAnchorMode, 'anchored', '新群友加入 → 并入，不跳窗口');
+assert.ok(rM.session.promptAnchorState.memberIds.includes('uC'), '丙进入锚点成员集');
+assert.ok(rM.up.includes('丙的印象'), '丙的印象进入记忆段');
 const N = pushUnread('uC', '丙', 'N');
 const rN = runOnce([N], rM.session.promptAnchorState);
 assert.equal(rN.session.promptAnchorMode, 'anchored', '丙成为"老人"后继续锚定');
@@ -172,6 +171,17 @@ assert.equal(rN.session.promptAnchorMode, 'anchored', '丙成为"老人"后继�
     maxExtraRead: 2, newUserIds: new Set(['uA'])
   });
   assert.equal(r.mode, 'reset', '锚点头不在已读池 → 重置');
+  const grown = resolvePromptAnchor({
+    readMessages: [{ id: 3, senderId: 'uA', text: 'c', ts: 3 }],
+    allReadMessages: [
+      { id: 1, senderId: 'uA', text: 'a', ts: 1 },
+      { id: 2, senderId: 'uA', text: 'b', ts: 2 },
+      { id: 3, senderId: 'uA', text: 'c', ts: 3 }
+    ],
+    prevAnchor: { readIds: [1], readCount: 1, memberIds: ['uA'] },
+    maxExtraRead: 0, maxAnchorRead: 2, newUserIds: new Set()
+  });
+  assert.equal(grown.mode, 'reset', '基座超过 maxAnchorRead → 重开滑窗');
 }
 
 // ═══ 场景 H：关闭开关 → 永远标准结构、无锚点状态 ═══

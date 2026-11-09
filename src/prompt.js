@@ -42,7 +42,8 @@ function toolProtocol() {
     '5. 看完消息决定不回，就安静结束。不回不需要理由，也不需要任何"收尾"动作。',
     '6. 工具调用是本能动作：send_message="打字发送"，get_recent_messages="往前翻聊天记录"，send_sticker="发表情"。内心不要写"我调用 xx 获取数据"这种伪代码。',
     '7. 【空格不是分句符号】QQ 消息里的空格会原样发送，真人不会用空格分句。想说两句就传数组，例如 ["在的","咋了"]。唯一可保留空格的是英文单词/数字之间的必要间隔（如 DeepSeek V3）。发送前自检：数组里每个字符串内部不应有用空格分隔的中文短句。',
-    '8. 【分条发送】普通对话默认 1 条，最多 2 条；只有讲故事、回忆、补刀时才 2~4 条。单条尽量短，多数 ≤30 字，不要小作文。'
+    '8. 【分条发送】普通对话默认 1 条，最多 2 条；只有讲故事、回忆、补刀时才 2~4 条。单条尽量短，多数 ≤30 字，不要小作文。',
+    '9. 【发完即结束】说完话的那次 send_message 直接传 finish:true，一次调用同时完成「发言」和「结束本轮」，不要发完再单独调 finish；后面还要发表情或继续查东西时才不传 finish。'
   ].join('\n');
 }
 
@@ -86,7 +87,6 @@ function notAQueue() {
   return [
     '【群聊不是客服队列】',
     '- 你不是来"处理消息"的，是来"混在群里"的。不需要把每条消息都看完、都回应。',
-    '- 一次来很多条时，先扫一眼"谁在聊、聊什么、有没有人 @/问你"，挑你真正想接的几条；其他划走不看。',
     '- 别人聊得正热、没叫你时，可以插一句有趣的/相关的，不要逐条点评，不要做群聊总结（例如"看到大家在聊……"）；插不上就安静看。',
     '- 收到消息是一个参与机会：优先看看有没有能自然接的话题；确实没话可说才安静离开。不要因为"路过"就默认划走。'
   ].join('\n');
@@ -96,7 +96,6 @@ function humanRhythm() {
   return [
     '【像真人一样】',
     '- 真人不会看到群里每一句话：你可以漏看、可以晚回、可以不回。已读信息里的旧消息不要求你回应，翻篇了就别硬接，除非有自然关联。',
-    '- 不要"别人说一句你就回一句"的机械应答。先判断：对方是不是还在说？是不是在跟别人说话？值不值得接？',
     '- 你刚说过话后，除非有人接你或你有新东西，否则不用马上再补一条；停止也是一种正常。',
     '- 有时只发"草""？"也比硬接强。',
     '- 学习群友的说话节奏：长短、分几条、语气词、什么时候不接话。把该群的语感当参考，不要变成复读机。'
@@ -588,24 +587,17 @@ export function buildTriggerBlock(triggerEntries, ctx) {
 //   · 【记忆】+【已读信息】= 锚点（字节不变，命中缓存）
 //   · 锚定窗口之后新沉淀的已读条目 →【新已读信息】（追加在锚点后）
 //   · 新增群友的印象 →【新加入成员】（未读信息之后，最易变区）
-//   · 追加条数超上限（promptAnchor.maxExtraRead）→ 整体重置回标准窗口，
-//     重新锚定 —— 已读按条计费，无限追加会"为了省钱花更多钱"。
+//   · 追加条数超上限（promptAnchor.maxExtraRead）或出现新群友 → 平滑并入：
+//     下一轮【已读信息】= 本轮【已读信息】+【新已读信息】，前缀连续。
+//   · 基座条数超过 maxAnchorRead（0 = 2× historyCount）→ 才整体重置回标准窗口。
 //
 // ⚠️ 锚定轮**不受 historyCount 截尾**（2026-09-26 修）：
 //   第一版实现里，已读窗口先按 historyCount 滑动截尾（BCDEF→CDEFG），
 //   再拿滑动后的窗口头部去和锚点比对 —— 滑动必然把锚点头部滚出去，
 //   锚点永远判 reset，实际效果 = 原来的滑动固定窗口（用户实测报告）。
 //   正确语义：锚定成立时，已读部分 = 锚点条目 + 追加条目（可以超过
-//   historyCount，最多到 锚点数 + maxExtraRead）；锚点不成立才回到
-//   historyCount 滑动窗口。"多带的那几条"就是追加预算，由 maxExtraRead 封顶。
-//
-// 判定"锚点是否仍可用"：
-//   · 锚点 readIds 的**第一条**仍在本轮滑动窗口内（锚点头未被滚出：
-//     一旦滚出，复用它会带上越来越老的内容，且追加预算迟早不够付）；
-//   · 锚点 id 之后的已读条数 ≤ maxExtraRead（追加预算内）；
-//   · 无新群友（记忆段成员集不变，字节前缀才可能不变）。
-//   三者全满足 → anchored；任一不满足 → reset（本轮滑窗尾部预留追加额度，
-//   成为新锚点）。
+//   historyCount）；超预算时把追加并进基座，而不是跳到最新滑窗。
+//   真重置只留给基座损坏：首锚、基座头丢失、id 序列断裂、基座超过条数上限。
 
 /**
  * 计算本次运行的锚点决策（纯函数，供测试直接驱动）。
@@ -615,34 +607,33 @@ export function buildTriggerBlock(triggerEntries, ctx) {
  * @param {Array}    [p.allReadMessages]  截尾前的全部已读（锚定轮从这里补齐被滑窗截掉的锚点条目；
  *                                        缺省 = readMessages 本身）
  * @param {object}   p.prevAnchor     上一轮的锚点状态（chatKey 级持久，orchestrator 传入）；null = 无锚点
- * @param {number}   p.maxExtraRead   允许在锚定窗口之外额外追加的已读条数上限
+ * @param {number}   p.maxExtraRead   允许挂在基座外面的新已读条数；超出则并入基座
+ * @param {number}   [p.maxAnchorRead] 基座条数上限；超出才整体重置。0 = 不在此处封顶
  * @param {Set|null} p.newUserIds     本轮窗口里首次出现（不在锚点记忆成员集里）的群友 QQ
- * @param {Array}    [p.triggerEntries]  本轮触发批（reset 轮把其中的新群友收进锚点成员集）
+ * @param {Array}    [p.triggerEntries]  本轮触发批（新群友从这里并入成员集，不因此跳窗口）
  * @returns {{
  *   mode: 'none'|'anchored'|'reset',
- *   anchor: {readIds:number[], readCount:number, memberIds:string[]}|null,  // 写回 orchestrator 的新锚点状态
- *   anchorMessages: Array,   // mode=anchored：锚点复用的已读条目（时间升序；从 allReadMessages 补齐）
- *   extraMessages: Array     // mode=anchored：锚定窗口之后追加展示的"新已读"条目
+ *   anchor: {readIds:number[], readCount:number, memberIds:string[]}|null,
+ *   anchorMessages: Array,
+ *   extraMessages: Array
  * }}
  */
-export function resolvePromptAnchor({ readMessages = [], allReadMessages = null, prevAnchor = null, maxExtraRead = 5, newUserIds = null, triggerEntries = null } = {}) {
+export function resolvePromptAnchor({ readMessages = [], allReadMessages = null, prevAnchor = null, maxExtraRead = 16, maxAnchorRead = 0, newUserIds = null, triggerEntries = null } = {}) {
   const reads = Array.isArray(readMessages) ? readMessages : [];
   const pool = Array.isArray(allReadMessages) ? allReadMessages : reads;
-  const cap = Math.max(0, Number(maxExtraRead) || 0);
-  const newIds = newUserIds instanceof Set ? newUserIds : null;
+  const extraCap = Math.max(0, Number(maxExtraRead) || 0);
+  const baseCap = Number(maxAnchorRead);
+  const newIds = newUserIds instanceof Set ? newUserIds : new Set();
+  const triggers = Array.isArray(triggerEntries) ? triggerEntries : [];
 
-  // 无锚点 / 上轮锚点为空：本轮滑窗直接成为新锚点（mode=reset 表示"锚点从本轮开始"）。
-  // 注意锚点取**全部窗口**（不截尾）：锚点 readIds = 全部已读 id —— 下一轮锚定
-  // 复用时的"已读信息"就等于本轮发出去的，追加预算从这之后起算。
-  // ⚠️ 成员集取"全量已读池 + 本轮触发批"的成员：reset 的典型诱因就是新群友
-  // 加入 —— 他此刻在触发批里（已读池排除触发批，还收不到），下一轮他的消息
-  // 沉淀进已读池时若不在锚点成员集里，又会触发一次 reset，永远锚不住。
+  // 无锚点 / 基座损坏：本轮滑窗成为新基座。成员只取滑窗和触发批，
+  // 避免把更早历史里的人全部塞进记忆前缀。
   const freshAnchor = () => ({
     mode: 'reset',
     anchor: {
       readIds: reads.map((m) => m.id),
       readCount: reads.length,
-      memberIds: [...new Set([...collectMemberIds(pool), ...collectMemberIds(triggerEntries || [])])]
+      memberIds: [...new Set([...collectMemberIds(reads), ...collectMemberIds(triggers)])]
     },
     anchorMessages: reads,
     extraMessages: []
@@ -652,38 +643,56 @@ export function resolvePromptAnchor({ readMessages = [], allReadMessages = null,
     return freshAnchor();
   }
 
-  // 新群友出现：记忆段必须扩展（新成员的印象在锚点里没有），字节前缀必然变 → 重置。
-  // 重置后新成员进锚点 memberIds，后续轮次他又成为"老人"，可继续锚定。
-  const hasNewMember = newIds ? [...newIds].some((u) => !prevAnchor.memberIds?.includes(String(u))) : false;
-  if (hasNewMember) return freshAnchor();
-
-  // 锚点条目从全量已读里找（滑窗截尾不影响锚点复用——锚定轮本就要带超过
-  // historyCount 的条目）。锚点第一条必须在场，且锚点 id 序列必须与全量
-  // 已读的某个前缀完全对齐（id 连续且顺序一致）。
   const poolIds = pool.map((m) => m.id);
-  const firstAnchorId = prevAnchor.readIds[0];
-  const start = poolIds.indexOf(firstAnchorId);
-  if (start < 0) return freshAnchor();   // 锚点头已滚出存档窗口（太久没触发/被清理）→ 重置
+  const start = poolIds.indexOf(prevAnchor.readIds[0]);
+  if (start < 0) return freshAnchor();
   const windowIds = poolIds.slice(start);
   const aligned = prevAnchor.readIds.length <= windowIds.length
     && prevAnchor.readIds.every((id, i) => windowIds[i] === id);
-  if (!aligned) return freshAnchor();    // 序列不连续（中间有消息被删等）→ 重置
+  if (!aligned) return freshAnchor();
 
-  const idMap = new Map(pool.map((m) => [m.id, m]));
-  const anchorMessages = prevAnchor.readIds.map((id) => idMap.get(id)).filter(Boolean);
+  const anchorMessages = pool.slice(start, start + prevAnchor.readIds.length);
   if (anchorMessages.length !== prevAnchor.readIds.length) return freshAnchor();
-  // 追加 = 锚点之后的全部已读（不按滑窗截尾算 —— 追加预算覆盖的就是这部分）
   const extraMessages = pool.slice(start + anchorMessages.length);
-  if (extraMessages.length > cap) return freshAnchor();   // 超出追加预算 → 重置
+
+  const known = new Set((prevAnchor.memberIds || []).map(String));
+  const joining = [];
+  const collectJoining = (list) => {
+    for (const m of list || []) {
+      const senderId = m?.senderId == null ? '' : String(m.senderId);
+      if (!senderId || m.self || senderId === 'self') continue;
+      if (newIds.has(senderId) || !known.has(senderId)) joining.push(senderId);
+    }
+  };
+  collectJoining(extraMessages);
+  collectJoining(triggers);
+
+  // 基座太长才真重置，回到最新的 historyCount 滑窗。
+  if (Number.isFinite(baseCap) && baseCap > 0 && prevAnchor.readIds.length + extraMessages.length > baseCap) {
+    return freshAnchor();
+  }
+
+  // 超预算或新群友：把新已读并进基座，这一轮不再单挂【新已读信息】。
+  if (extraMessages.length > extraCap || joining.length > 0) {
+    return {
+      mode: 'anchored',
+      anchor: {
+        readIds: [...prevAnchor.readIds, ...extraMessages.map((m) => m.id)],
+        readCount: prevAnchor.readIds.length + extraMessages.length,
+        memberIds: [...new Set([...(prevAnchor.memberIds || []).map(String), ...joining])],
+        merged: extraMessages.length
+      },
+      anchorMessages: [...anchorMessages, ...extraMessages],
+      extraMessages: []
+    };
+  }
 
   return {
     mode: 'anchored',
-    // 锚点状态原样延续（readIds 不变；memberIds 并上本轮出现的全部成员，
-    // 理论上 anchored 时不会有新成员，并集只是防御）
     anchor: {
       readIds: prevAnchor.readIds.slice(),
-      readCount: prevAnchor.readCount,
-      memberIds: [...new Set([...(prevAnchor.memberIds || []), ...collectMemberIds(reads)])]
+      readCount: prevAnchor.readIds.length,
+      memberIds: (prevAnchor.memberIds || []).map(String)
     },
     anchorMessages,
     extraMessages
@@ -733,6 +742,10 @@ export function buildUserPrompt(ctx) {
   const anchorCfg = cfg.store?.promptAnchor || {};
   const anchorEnabled = anchorCfg.enabled !== false;
   const anchorMaxExtra = Math.max(0, Number(anchorCfg.maxExtraRead) || 0);
+  const historyCount = Number(cfg.store?.historyCount);
+  const windowSize = Number.isFinite(historyCount) && historyCount > 0 ? historyCount : 80;
+  const configuredBase = Number(anchorCfg.maxAnchorRead);
+  const anchorMaxBase = configuredBase > 0 ? configuredBase : windowSize * 2;
   let anchorDecision = null;
   if (anchorEnabled) {
     // 成员集差集：本轮全量已读 + 触发批里"锚点成员集"没有的群友 = 新加入话题的人
@@ -747,6 +760,7 @@ export function buildUserPrompt(ctx) {
       allReadMessages: pastPool.messages,
       prevAnchor: ctx.promptAnchor?.prev || null,
       maxExtraRead: anchorMaxExtra,
+      maxAnchorRead: anchorMaxBase,
       newUserIds: newUsers,
       triggerEntries: ctx.triggerEntries
     });
@@ -799,7 +813,7 @@ export function buildUserPrompt(ctx) {
   parts.push([
     '【引导说明】',
     '- 扫一眼【已读信息】【新已读信息】和【未读信息】，判断：有没有人在找你？有没有你能接的话题？值不值得说话？',
-    '- 想说话：调用 send_message（要分条就传数组）。想引用就带 replyToMessageId：id 见【未读信息】每条前的 #数字、历史里带图消息的 #数字，或用 get_recent_messages 查，不要自己编。',
+    '- 想说话：调用 send_message（要分条就传数组）。说完话的那次直接传 finish:true，一次调用同时完成发言和结束本轮；后面还要发表情或继续查东西时才不传。想引用就带 replyToMessageId：id 见【未读信息】每条前的 #数字、历史里带图消息的 #数字，或用 get_recent_messages 查，不要自己编。',
     '- 不想说话：直接结束或调用 finish（一句话说明原因）。不回是正常选项，不是失职。',
     '- 记得：你的普通文本输出不会发到 QQ，只有工具调用会。'
   ].join('\n'));

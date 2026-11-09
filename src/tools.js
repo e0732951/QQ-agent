@@ -204,7 +204,7 @@ function registerAllTools() {
   registerTool({
     id: 'send_message',
     name: '发送消息',
-    description: '发送消息到当前聊天（本工具只能发到本次会话对应的群/私聊；要发到别处用 send_to）。messages 传字符串=发一条；传字符串数组=分多条发送（推荐，更像真人）。只有需要明确"我回的是哪条"时才传 replyToMessageId 引用；需要点名某人才传 atUserId。不要在字符串内部用空格分句。',
+    description: '发送消息到当前聊天（本工具只能发到本次会话对应的群/私聊；要发到别处用 send_to）。messages 传字符串=发一条；传字符串数组=分多条发送。说完话就传 finish:true，发言和结束一次调用搞定，不要发完再单独调 finish。只有需要明确"我回的是哪条"时才传 replyToMessageId 引用；需要点名某人才传 atUserId。不要在字符串内部用空格分句。',
     category: 'messaging',
     icon: '💬',
     parameters: {
@@ -212,7 +212,10 @@ function registerAllTools() {
       properties: {
         messages: { description: '要发送的内容：字符串=一条；数组=分多条', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
         replyToMessageId: { type: ['integer', 'string'], description: '要引用/回复的消息 id（聊天记录里每条消息前的 #数字，可选）' },
-        atUserId: { type: ['integer', 'string'], description: '要 @ 的群成员 QQ 号（可选，与引用二选一，不要滥用）' }
+        atUserId: { type: ['integer', 'string'], description: '要 @ 的群成员 QQ 号（可选，与引用二选一，不要滥用）' },
+        finish: { type: ['boolean', 'string'], description: '发完就结束本轮（默认 false）。这是你最后一条发言时传 true，就不必再单独调 finish；后面还要发表情或继续做事才不传。' },
+        reason: { type: 'string', description: '结束原因（可省，配合 finish 使用，如"说完了""话题结束"）' },
+        activeTopic: { type: 'string', description: '想继续深聊的话题（≤60 字，可省，配合 finish 使用）' }
       },
       required: ['messages']
     },
@@ -226,9 +229,16 @@ function registerAllTools() {
         });
         ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
         ctx.emit('session-update', ctx.session.id);
-        const note = ['已发送。不要输出"已发送"类汇报，继续思考下一步或直接结束。'];
+        const wantsFinish = args.finish === true || args.finish === 'true';
+        if (wantsFinish) {
+          if (args.reason) ctx.session.finishReason = String(args.reason).slice(0, 300);
+          if (args.activeTopic) ctx.session.activeTopic = String(args.activeTopic).slice(0, 60);
+        }
+        const note = [wantsFinish
+          ? '已发送，本轮到此结束。不要再调用工具，也不要输出汇报。'
+          : '已发送。不要输出"已发送"类汇报。后面还要发表情或继续查东西就继续；说完了就在这次调用里传 finish:true。'];
         if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
-        return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
+        return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), finished: wantsFinish, note: note.join('') });
       } catch (error) {
         return err(error?.message ?? error);
       }
@@ -852,7 +862,7 @@ function registerAllTools() {
   registerTool({
     id: 'finish',
     name: '结束会话',
-    description: '明确结束本次处理（表示你看完了、决定了下一步）。看完不打算说话时调用它（summary 写一句给自己看的理由）；说完话想收尾时也可以调用。不调用也可以——直接结束文本输出同样代表结束。处于活跃期时，若判断话题已结束/偏离，也用它结束（reason 填"话题结束"）。',
+    description: '结束这次回复。有话要说时改用 send_message 并在同一次调用里传 finish:true；只有什么都不想说时才单独调这个。处于活跃期时，若判断话题已结束/偏离，也用它结束（summary 填"话题结束"）。',
     category: 'system',
     icon: '✅',
     parameters: {

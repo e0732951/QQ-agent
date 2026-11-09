@@ -637,8 +637,8 @@ function mountActiveConfigEditor(root) {
         <div class="checkbox-row"><input type="checkbox" id="tp-anchor" ${stNow.promptAnchor?.enabled !== false ? 'checked' : ''} />
           <label for="tp-anchor">复用上一轮的记忆+已读前缀，只追加新内容（推荐开启，缓存命中大幅省 token）</label></div>
         <div class="tp-row">最多额外追加
-          <input class="inp mono tp-count" type="number" id="tp-anchor-extra" min="1" max="50" value="${esc(Number(stNow.promptAnchor?.maxExtraRead ?? 5))}" />
-          条已读，超出则整体重置窗口。</div>
+          <input class="inp mono tp-count" type="number" id="tp-anchor-extra" min="1" max="50" value="${esc(Number(stNow.promptAnchor?.maxExtraRead ?? 16))}" />
+          条已读，超出则并入原来的已读，前缀不断；基座大约到两倍历史条数才重开。</div>
         <div class="field"><label>② 的关键词表（每行一个，不区分大小写）</label>
           <textarea id="tp-keywords" rows="4" placeholder="小鲸鱼&#10;bot">${esc((stNow.keywords || []).join('\n'))}</textarea></div>
         <h4 class="tp-h" style="margin-top:12px">被召唤后持续参与</h4>
@@ -657,7 +657,7 @@ function mountActiveConfigEditor(root) {
             historyCount: clampInt(sub.querySelector('#tp-historycount')?.value, 1, 500, 80),
             promptAnchor: {
               enabled: sub.querySelector('#tp-anchor')?.checked === true,
-              maxExtraRead: clampInt(sub.querySelector('#tp-anchor-extra')?.value, 1, 50, 5)
+              maxExtraRead: clampInt(sub.querySelector('#tp-anchor-extra')?.value, 1, 50, 16)
             },
             keywords: String(sub.querySelector('#tp-keywords')?.value || '').split('\n').map((x) => x.trim()).filter(Boolean)
           },
