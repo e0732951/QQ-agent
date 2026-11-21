@@ -620,14 +620,35 @@ async function ensureWeights(c, voice) {
   }
 }
 
+/** 念之前先去掉会让合成器装腔的符号。群里发出去的仍是语音，不是这段整理稿。 */
+function prepareSpeech(text) {
+  let t = String(text ?? '');
+  t = t.replace(/\p{Extended_Pictographic}/gu, '');
+  t = t.replace(/[（(][^）)]{0,12}[）)]/g, '');
+  t = t.replace(/[.]{2,}|[。]{2,}|…+/g, '，');
+  t = t.replace(/[~～]+/g, '');
+  t = t.replace(/[！!]{2,}/g, '！').replace(/[？?]{2,}/g, '？');
+  t = t.replace(/([\p{Script=Han}])\s+(?=[\p{Script=Han}])/gu, '$1');
+  t = t.replace(/\s+/g, ' ').replace(/，{2,}/g, '，').trim();
+  return t;
+}
+
+function speechPlan(text) {
+  const compact = text.replace(/\s/g, '');
+  const oneBreath = compact.length <= 28 && !/[。！？!?]/.test(compact);
+  const first = oneBreath ? 'cut0' : 'cut1';
+  const seed = () => Math.floor(Math.random() * 2147483647);
+  return [[first, seed()], [first === 'cut0' ? 'cut1' : 'cut0', seed()]];
+}
+
 async function synthesize(c, voice, text, language) {
-  // 先把语音接口确保起来（没在跑就自动拉起来；关了自动启动就直接报"接口没运行"）
   const api = await ensureApiServer(c);
   if (!api.ok) throw new Error(api.error || '语音接口不可用');
   await ensureWeights(c, voice);
-  // 换切分方式 + 换随机种子重试：GPT-SoVITS 少数情况下会生成静音或半截音频，
-  // 同一份参数重试常常还是坏的，换个种子基本都能出正常音频。
-  const plans = [['cut5', 1234], ['cut5', 42], ['cut1', 20260928]];
+  const spoken = prepareSpeech(text) || String(text ?? '').trim();
+  // 短句不再按逗号切开。cut5 会把一句拆成几段再留空档，听起来像在念稿。
+  // 采样比之前松一点，避免每次都走同一条最稳的读法。
+  const plans = speechPlan(spoken);
   let lastError = null;
   for (const [method, seed] of plans) {
     try {
@@ -635,19 +656,19 @@ async function synthesize(c, voice, text, language) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text,
+          text: spoken,
           text_lang: language,
           ref_audio_path: voice.refAudioPath,
           prompt_text: voice.promptText,
           prompt_lang: voice.promptLang || language,
           text_split_method: method,
           batch_size: 1,
-          top_k: 5,
-          top_p: 0.85,
-          temperature: 0.8,
-          repetition_penalty: 1.2,
+          top_k: 15,
+          top_p: 1,
+          temperature: 1,
+          repetition_penalty: 1.15,
           speed_factor: voice.speedFactor,
-          fragment_interval: 0.15,
+          fragment_interval: 0.06,
           seed,
           media_type: 'wav',
           streaming_mode: false

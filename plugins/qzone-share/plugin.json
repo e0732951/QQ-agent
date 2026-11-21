@@ -1,0 +1,55 @@
+{
+  "id": "qzone-share",
+  "name": "QQ空间动态",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "每天自己挑两三个时间，写一条短说说，用本地生图配上一张图，发到机器人自己的 QQ 空间，并把同一条文案和图片分享到群里。",
+  "author": "本机定制",
+  "entry": "index.js",
+  "permissions": [],
+  "enabledByDefault": true,
+  "capabilities": ["qzone.plan"],
+  "requires": [],
+  "settings": {
+    "enabled": true,
+    "visibility": "friends",
+    "dayStartHour": 9,
+    "dayEndHour": 22,
+    "minGapMin": 150,
+    "groupId": ""
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用空间动态",
+      "description": "关闭后不再发新说说。已经发出去的不会删。"
+    },
+    "visibility": {
+      "type": "enum",
+      "values": ["friends", "public", "self"],
+      "label": "谁能看见",
+      "description": "friends = 好友可见，public = 所有人，self = 仅自己。"
+    },
+    "dayStartHour": {
+      "type": "number",
+      "label": "最早几点发",
+      "description": "默认 9。这之前不发。"
+    },
+    "dayEndHour": {
+      "type": "number",
+      "label": "最晚几点发",
+      "description": "默认 22，实际停在 22:30。这之后不发。"
+    },
+    "minGapMin": {
+      "type": "number",
+      "label": "两条之间至少隔几分钟",
+      "description": "默认 150。一天仍是 2 或 3 条，时间在这个间隔里随机。"
+    },
+    "groupId": {
+      "type": "string",
+      "label": "分享到哪个群",
+      "description": "留空就用机器人允许回复的第一个群。填写群号则只分享到这个群。"
+    }
+  }
+}

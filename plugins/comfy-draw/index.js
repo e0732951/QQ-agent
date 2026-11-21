@@ -169,6 +169,74 @@ function keepRecent(dir) {
   }
 }
 
+/** 只生成文件，不发到聊天。QQ 空间和看图工具共用这一次，避免两张图同时上显卡。 */
+export async function generateStill({ prompt, width, height } = {}) {
+  const c = cfg();
+  if (c.enabled === false) return { ok: false, error: '本地生图已经关掉。' };
+  const text = String(prompt ?? '').replace(/\s+/g, ' ').trim().slice(0, 800);
+  if (text.length < 2) return { ok: false, error: 'prompt 太短。请写清要画的主体、动作和场景。' };
+  if (drawing) return { ok: false, error: '上一张还在画。' };
+  const base = baseOf(c);
+  const w = snap(width, c.width);
+  const h = snap(height, c.height);
+  const seed = Math.floor(Math.random() * 2147483647);
+  const timeoutMs = Math.max(20000, Math.min(300000, Number(c.timeoutMs) || DEFAULTS.timeoutMs));
+  drawing = true;
+  try {
+    let alive;
+    try {
+      alive = await readJson(`${base}/system_stats`, 4000);
+    } catch (error) {
+      return { ok: false, error: `ComfyUI 没连上（${base}）：${error?.message ?? error}` };
+    }
+    if (!alive.ok) return { ok: false, error: `ComfyUI 没有在 ${base} 响应（HTTP ${alive.status}）。` };
+
+    const workflow = buildWorkflow(c, text, w, h, seed);
+    const res = await fetch(`${base}/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: workflow, client_id: 'qq-agent-comfy-draw' }),
+      signal: AbortSignal.timeout(20000)
+    });
+    const raw = await res.text();
+    let body = null;
+    try { body = raw ? JSON.parse(raw) : null; } catch { body = { raw: raw.slice(0, 500) }; }
+    if (!res.ok || !body?.prompt_id) {
+      const why = body?.error?.message || body?.node_errors || body?.raw || `HTTP ${res.status}`;
+      return { ok: false, error: `生图没有排上队：${typeof why === 'string' ? why : JSON.stringify(why).slice(0, 400)}` };
+    }
+    if (body.node_errors && Object.keys(body.node_errors).length) {
+      return { ok: false, error: `工作流有节点错误：${JSON.stringify(body.node_errors).slice(0, 400)}` };
+    }
+    log(`开始生图 ${w}x${h} seed=${seed}`);
+    const item = await waitImage(base, body.prompt_id, timeoutMs);
+    if (!item) return { ok: false, error: '画画超时了，这一次已经撤掉。' };
+    if (item.status?.status_str === 'error' || item.status?.completed === false) {
+      return { ok: false, error: `画画失败：${errorText(item, 'ComfyUI 返回错误')}` };
+    }
+    const image = firstImage(item);
+    if (!image) return { ok: false, error: '队列跑完了，但没有拿到图片。' };
+    const view = new URL(`${base}/view`);
+    view.searchParams.set('filename', image.filename);
+    view.searchParams.set('subfolder', image.subfolder || '');
+    view.searchParams.set('type', image.type || 'output');
+    const imgRes = await fetch(view, { signal: AbortSignal.timeout(20000) });
+    if (!imgRes.ok) return { ok: false, error: `图生成了，但下载失败（HTTP ${imgRes.status}）。` };
+    const bytes = Buffer.from(await imgRes.arrayBuffer());
+    if (bytes.length < 32) return { ok: false, error: '下载到的图片是空的。' };
+    fs.mkdirSync(OUT_DIR, { recursive: true });
+    const saved = path.join(OUT_DIR, `${Date.now()}.png`);
+    fs.writeFileSync(saved, bytes);
+    try { keepRecent(OUT_DIR); } catch { /* 清理失败不影响使用 */ }
+    log(`生图完成 ${Math.round(bytes.length / 1024)}KB`);
+    return { ok: true, file: saved, width: w, height: h };
+  } catch (error) {
+    return { ok: false, error: `生图失败：${error?.message ?? error}` };
+  } finally {
+    drawing = false;
+  }
+}
+
 export function promptSections() {
   const c = cfg();
   if (c.enabled === false) return [];
@@ -211,83 +279,12 @@ export function setup(api) {
       required: ['prompt']
     },
     async execute(ctx, args) {
-      const c = cfg();
-      if (c.enabled === false) {
-        return { content: '本地生图已经关掉。', isError: true };
-      }
-      const text = String(args?.prompt ?? '').replace(/\s+/g, ' ').trim().slice(0, 800);
-      if (text.length < 2) {
-        return { content: 'prompt 太短。请写清要画的主体、动作和场景。', isError: true };
-      }
-      if (drawing) {
-        return { content: '上一张还在画，这一轮先不画。告诉对方等一下。', isError: true };
-      }
-      const base = baseOf(c);
-      const width = snap(args?.width, c.width);
-      const height = snap(args?.height, c.height);
-      const seed = Math.floor(Math.random() * 2147483647);
-      const timeoutMs = Math.max(20000, Math.min(300000, Number(c.timeoutMs) || DEFAULTS.timeoutMs));
-      drawing = true;
       const started = Date.now();
+      const made = await generateStill({ prompt: args?.prompt, width: args?.width, height: args?.height });
+      if (!made.ok) return { content: `${made.error} 不要假装已经画了。`, isError: true };
+      const saved = made.file;
+      const bytes = fs.readFileSync(saved);
       try {
-        let alive;
-        try {
-          alive = await readJson(`${base}/system_stats`, 4000);
-        } catch (error) {
-          return { content: `ComfyUI 没连上（${base}）：${error?.message ?? error}。不要假装已经画了。`, isError: true };
-        }
-        if (!alive.ok) {
-          return { content: `ComfyUI 没有在 ${base} 响应（HTTP ${alive.status}）。不要假装已经画了。`, isError: true };
-        }
-
-        const workflow = buildWorkflow(c, text, width, height, seed);
-        const res = await fetch(`${base}/prompt`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: workflow, client_id: 'qq-agent-comfy-draw' }),
-          signal: AbortSignal.timeout(20000)
-        });
-        const raw = await res.text();
-        let body = null;
-        try { body = raw ? JSON.parse(raw) : null; } catch { body = { raw: raw.slice(0, 500) }; }
-        if (!res.ok || !body?.prompt_id) {
-          const why = body?.error?.message || body?.node_errors || body?.raw || `HTTP ${res.status}`;
-          return { content: `生图没有排上队：${typeof why === 'string' ? why : JSON.stringify(why).slice(0, 400)}`, isError: true };
-        }
-        if (body.node_errors && Object.keys(body.node_errors).length) {
-          return { content: `工作流有节点错误：${JSON.stringify(body.node_errors).slice(0, 400)}`, isError: true };
-        }
-
-        log(`开始生图 ${width}x${height} seed=${seed}`);
-        const item = await waitImage(base, body.prompt_id, timeoutMs);
-        if (!item) {
-          return { content: '画画超时了，这一次已经撤掉。告诉对方这次没画出来。', isError: true };
-        }
-        if (item.status?.status_str === 'error' || item.status?.completed === false) {
-          return { content: `画画失败：${errorText(item, 'ComfyUI 返回错误')}`, isError: true };
-        }
-        const image = firstImage(item);
-        if (!image) {
-          return { content: '队列跑完了，但没有拿到图片。', isError: true };
-        }
-
-        const view = new URL(`${base}/view`);
-        view.searchParams.set('filename', image.filename);
-        view.searchParams.set('subfolder', image.subfolder || '');
-        view.searchParams.set('type', image.type || 'output');
-        const imgRes = await fetch(view, { signal: AbortSignal.timeout(20000) });
-        if (!imgRes.ok) {
-          return { content: `图生成了，但下载失败（HTTP ${imgRes.status}）。`, isError: true };
-        }
-        const bytes = Buffer.from(await imgRes.arrayBuffer());
-        if (bytes.length < 32) {
-          return { content: '下载到的图片是空的。', isError: true };
-        }
-        fs.mkdirSync(OUT_DIR, { recursive: true });
-        const saved = path.join(OUT_DIR, `${Date.now()}.png`);
-        fs.writeFileSync(saved, bytes);
-        try { keepRecent(OUT_DIR); } catch { /* 清理失败不影响发送 */ }
-
         if (!ctx?.sender || typeof ctx.sender.sendImage !== 'function') {
           return { content: '图已经生成，但当前会话发不出去。', isError: true };
         }
@@ -307,13 +304,15 @@ export function setup(api) {
         ctx.emit?.('session-update', ctx.session?.id);
         log(`已发图 ${Math.round(bytes.length / 1024)}KB，用时 ${Math.round((Date.now() - started) / 1000)} 秒`);
         return {
-          content: `图已经发到当前聊天（${width}×${height}，消息 id ${sent?.message_id ?? '未知'}）。不要再调用 send_image，不要说已发送。想配话就另发一句短的。`
+          content: `图已经发到当前聊天（${made.width}×${made.height}，消息 id ${sent?.message_id ?? '未知'}）。不要再调用 send_image，不要说已发送。想配话就另发一句短的。`
         };
       } catch (error) {
-        return { content: `生图失败：${error?.message ?? error}`, isError: true };
-      } finally {
-        drawing = false;
+        return { content: `图已经生成，但发送失败：${error?.message ?? error}`, isError: true };
       }
     }
   });
 }
+
+export const providers = {
+  'image.generate': (args) => generateStill(args)
+};

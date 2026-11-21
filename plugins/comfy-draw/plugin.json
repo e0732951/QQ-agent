@@ -9,7 +9,7 @@
   "entry": "index.js",
   "permissions": [],
   "enabledByDefault": true,
-  "capabilities": [],
+  "capabilities": ["image.generate"],
   "requires": [],
   "settings": {
     "enabled": true,
