@@ -1,0 +1,22 @@
+{
+  "id": "forward-reply",
+  "name": "转发评论篇幅",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "chat",
+  "description": "别人发来合并转发时，先把文字和图片提炼成实际内容，评论写得和这段提炼一样长。",
+  "author": "本机定制",
+  "entry": "index.js",
+  "permissions": [],
+  "enabledByDefault": true,
+  "capabilities": [],
+  "requires": [],
+  "settings": { "enabled": true },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "按提炼结果决定评论篇幅",
+      "description": "关掉后恢复平时的短回复。打开时，评论长短跟着转发文字和图片提炼出来的篇幅走。"
+    }
+  }
+}
