@@ -1,7 +1,7 @@
 /**
  * 每天 2 或 3 条 QQ 空间说说。时间在白天随机，不扎堆。
  * 文案交给当前模型写，配图走本地生图插件的 image.generate。
- * 空间发出去之后，把同一条文案和同一张图分享到群里。
+ * 空间发出去之后，按「已发动态 → 分享」把那一条分享到群里，不再贴一份原文和原图。
  */
 
 import fs from 'node:fs';
@@ -170,6 +170,34 @@ async function onebot(action, params) {
   return body.data ?? body;
 }
 
+async function momentPreview(tid) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, 1500));
+    const list = await onebot('get_qzone_msg_list', { pos: 0, num: 8 });
+    const row = (list?.msglist || []).find((item) => String(item?.tid) === String(tid));
+    const url = String(row?.images?.[0] || '').trim();
+    if (url) return url;
+  }
+  return '';
+}
+
+/** 分享已经发出的那一条说说，走 QQ 自己的图文分享卡片，点开回到这条动态。 */
+async function shareExistingMoment(tid, caption, groupId) {
+  if (!tid) throw new Error('说说没有编号，没法分享这一条');
+  const login = await onebot('get_login_info', {});
+  const uin = String(login?.user_id || '').replace(/\D/g, '');
+  if (!uin) throw new Error('没有拿到自己的 QQ 号');
+  const preview = await momentPreview(tid);
+  await onebot('send_tuwen_ark', {
+    group_id: Number(groupId),
+    title: caption.slice(0, 80),
+    desc: 'QQ空间',
+    summary: '[分享]',
+    jump_url: `https://user.qzone.qq.com/${uin}/mood/${encodeURIComponent(tid)}`,
+    ...(preview ? { preview_url: preview } : {})
+  });
+}
+
 async function publishOne(state, slot) {
   const s = settings();
   const idea = await invent(state);
@@ -189,13 +217,7 @@ async function publishOne(state, slot) {
     log('说说已发，但没有可分享的群');
   } else {
     try {
-      await onebot('send_group_msg', {
-        group_id: Number(groupId),
-        message: [
-          { type: 'text', data: { text: idea.caption } },
-          { type: 'image', data: { file: `base64://${bytes.toString('base64')}` } }
-        ]
-      });
+      await shareExistingMoment(tid, idea.caption, groupId);
       groupShared = true;
     } catch (error) {
       log(`说说已发，分享到群 ${groupId} 失败：${error?.message ?? error}`);
