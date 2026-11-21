@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "apiVersion": 1,
   "category": "media",
-  "description": "把别人发来的 QQ 语音，用 GPT-SoVITS 自带的中文 FunASR（Paraformer）转成文字，写进对话里给模型看。这是语音回复的反向：回复插件把文字念出去，这个插件把听到的语音读进来。识别服务没开时会在后台拉起来；失败就保持原来的「[语音]」占位，不会把消息弄丢。",
+  "description": "把别人发来的 QQ 语音，用 comfy-dafeiyu 里的中文 FunASR 转成文字，写进对话里给模型看。识别服务随那个项目启动和退出，本插件只负责调用，不再自己拉起或关掉进程。失败就保持原来的「[语音]」占位，不会把消息弄丢。",
   "author": "本机定制",
   "entry": "index.js",
   "permissions": [],
@@ -15,7 +15,7 @@
   "requires": [],
   "settings": {
     "asrUrl": "http://127.0.0.1:9881",
-    "autoStartApi": true,
+    "autoStartApi": false,
     "pythonPath": "D:\\Program Files\\dafeiyu\\GPT-SoVITS-v2pro-20261006\\runtime\\python.exe",
     "apiWorkDir": "D:\\Program Files\\dafeiyu\\GPT-SoVITS-v2pro-20261006",
     "device": "auto",
@@ -30,18 +30,18 @@
     },
     "autoStartApi": {
       "type": "boolean",
-      "label": "服务没运行时自动启动",
-      "description": "默认开。收到语音时如果识别服务没在跑，插件会用下面的 python 在后台把它拉起来。"
+      "label": "（已停用）不再由这里启动识别",
+      "description": "识别服务改由 comfy-dafeiyu 启动和关闭。这个开关不再拉起进程。"
     },
     "pythonPath": {
       "type": "string",
-      "label": "python 解释器",
-      "description": "GPT-SoVITS 整合包里的 runtime\\python.exe。里面已经装好 FunASR。"
+      "label": "（已停用）python 路径",
+      "description": "不再使用。启动参数在 comfy-dafeiyu\\gpt-sovits\\bridge.json。"
     },
     "apiWorkDir": {
       "type": "string",
-      "label": "GPT-SoVITS 根目录",
-      "description": "识别模型在这个目录的 tools\\asr\\models 下面。留空则无法启动。"
+      "label": "（已停用）模型目录",
+      "description": "不再使用。模型路径在 comfy-dafeiyu\\gpt-sovits\\bridge.json。"
     },
     "device": {
       "type": "enum",

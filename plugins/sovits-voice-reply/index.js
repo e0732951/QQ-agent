@@ -30,7 +30,6 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { DATA_DIR } from '../../src/config.js';
 import { OneBotClient } from '../../src/onebot.js';
@@ -219,7 +218,9 @@ function skipChatSet() {
   return skipCache.set;
 }
 
-// ── 语音接口（GPT-SoVITS 服务端）：探活 + 自动拉起 ────────────────────────
+// ── 语音接口：只探测，不启动、不关闭 ──────────────────────────────────────
+// 接口由 comfy-dafeiyu 在自己的进程里拉起，并在那个项目退出时关掉。
+// 这里再 spawn 或调用 /control?command=exit，就会和那一侧抢进程。
 /**
  * 探一下接口端口通不通（TCP 连接，不发请求，几百微秒）。
  * 用 TCP 而不是 GET：api_v2 的根路径会返回 404，那也算"服务在跑"，但用 HTTP 判断容易误报。
@@ -246,86 +247,20 @@ function probeApiPort(c, timeoutMs = 1500) {
   });
 }
 
-/**
- * 保证语音接口在运行：通就直接返回；不通且开了自动启动，就把它拉起来等它就绪。
- *
- * 退避很重要：万一是显卡被占/依赖缺失导致 python 一起来就崩，
- * 不能每条消息都去拉一个新进程。失败后 1 分钟 → 5 分钟 → 15 分钟 才再试，成功后清零。
- *
- * @returns {Promise<{ok: boolean, started?: boolean, error?: string}>}
- */
+const API_DOWN = '语音接口没在运行。它由 comfy-dafeiyu 启动，请先打开那个项目。';
+
 function ensureApiServer(c) {
-  if (G.server.starting) return G.server.starting;      // 已经有人在拉，等同一个结果
-  if (!c.autoStartApi) {
-    return probeApiPort(c).then((ok) => {
-      G.server.ok = ok; G.server.at = Date.now();
-      return ok ? { ok: true } : { ok: false, error: '语音接口没在运行（自动启动是关的）' };
-    });
-  }
-  return probeApiPort(c).then((up) => {
-    G.server.ok = up; G.server.at = Date.now();
-    if (up) return { ok: true };
-    const backoff = [60000, 300000, 900000][Math.min(G.server.attempts, 2)];
-    const waited = Date.now() - G.server.lastTryAt;
-    if (G.server.attempts > 0 && waited < backoff) {
-      const left = Math.ceil((backoff - waited) / 1000);
-      return { ok: false, error: `上次启动失败（${G.server.lastError || '原因见 api-server.log'}），${left} 秒后再试` };
-    }
-    return startApiServer(c);
+  return probeApiPort(c).then((ok) => {
+    G.server.ok = ok;
+    G.server.at = Date.now();
+    if (!ok) G.server.lastError = API_DOWN;
+    else G.server.lastError = '';
+    return ok ? { ok: true } : { ok: false, error: API_DOWN };
   });
 }
 
-/** 真的把 python 拉起来，并等端口就绪。 */
 function startApiServer(c) {
-  G.server.starting = (async () => {
-    G.server.lastTryAt = Date.now();
-    G.server.attempts += 1;
-    let fd = null;
-    try {
-      if (!c.pythonPath || !fs.existsSync(c.pythonPath)) throw new Error(`找不到 python：${c.pythonPath || '(未设置)'}`);
-      if (!c.apiScriptPath || !fs.existsSync(c.apiScriptPath)) throw new Error(`找不到 api_v2.py：${c.apiScriptPath || '(未设置)'}`);
-      const url = new URL(c.apiUrl);
-      const host = url.hostname || '127.0.0.1';
-      const port = url.port || '9880';
-      fs.mkdirSync(path.dirname(API_LOG), { recursive: true });
-      fd = fs.openSync(API_LOG, 'a');
-      const child = spawn(
-        c.pythonPath,
-        [c.apiScriptPath, '-a', host, '-p', String(port), '-c', 'GPT_SoVITS/configs/tts_infer.yaml'],
-        {
-          cwd: c.apiWorkDir || path.dirname(c.apiScriptPath),
-          detached: true,          // 让 QQ Agent 退出时不用等它
-          windowsHide: true,       // 不弹黑窗口
-          stdio: ['ignore', fd, fd]
-        }
-      );
-      child.unref();
-      rtLog('启动', `已拉起语音接口（pid ${child.pid}）：${c.pythonPath}`);
-      // 等它加载完模型（首次 1~3 分钟）
-      const deadline = Date.now() + c.apiStartTimeoutMs;
-      while (Date.now() < deadline) {
-        await sleep(2000);
-        if (await probeApiPort(c, 1000)) {
-          G.server.ok = true; G.server.at = Date.now();
-          G.server.attempts = 0; G.server.lastError = '';
-          rtLog('启动', `语音接口已就绪（用了约 ${Math.round((Date.now() - G.server.lastTryAt) / 1000)} 秒）`);
-          return { ok: true, started: true };
-        }
-      }
-      throw new Error(`等了 ${Math.round(c.apiStartTimeoutMs / 1000)} 秒还是没起来，看 ${API_LOG}`);
-    } catch (error) {
-      const msg = errText(error);
-      G.server.ok = false;
-      G.server.lastError = msg;
-      rtLog('启动失败', msg);
-      warnOnce(`自动启动语音接口失败：${msg}`);
-      return { ok: false, error: msg };
-    } finally {
-      try { if (fd !== null) fs.closeSync(fd); } catch { /* 子进程已拿到自己的句柄 */ }
-      G.server.starting = null;
-    }
-  })();
-  return G.server.starting;
+  return ensureApiServer(c);
 }
 
 // ── 关掉语音接口（插件开关 = 接口开关）─────────────────────────────────────
@@ -345,44 +280,8 @@ function isLocalApi(c) {
   }
 }
 
-/**
- * 让语音接口退出（用户关掉插件开关时调用）。
- * @returns {Promise<{ok: boolean, stopped?: boolean, already?: boolean, reason?: string}>}
- */
-async function stopApiServer(c) {
-  if (!isLocalApi(c)) return { ok: false, reason: '接口不在本机（可能是共享的），没有去关它' };
-  if (!(await probeApiPort(c, 1200))) { G.server.ok = false; return { ok: true, already: true }; }
-
-  let sendError = null;
-  try {
-    await fetchWithTimeout(`${c.apiUrl}/control?command=exit`, {}, 15000);
-  } catch (error) {
-    // ⚠️ 这里报错是**正常现象**，不是失败：api_v2.py 的 /control 是
-    //    `handle_control('exit')` → `os.kill(os.getpid(), SIGTERM)` —— 它先把自己杀了，
-    //    响应根本来不及发出来，客户端必然看到连接被重置（fetch failed）。
-    //    所以绝不能凭"请求失败"就断定没关掉，要看**端口最终有没有释放**。
-    sendError = errText(error);
-  }
-
-  for (let i = 0; i < 20; i++) {
-    await sleep(500);
-    if (!(await probeApiPort(c, 600))) {
-      G.server.ok = false;
-      G.server.attempts = 0;      // 清掉退避，下次开启立刻就能重新拉起
-      G.server.lastError = '';
-      G.server.starting = null;
-      rtLog('停止', sendError
-        ? '已让语音接口退出、端口已释放（接口是直接把自己杀掉的，所以请求会报连接中断，属正常）'
-        : '已让语音接口退出、端口已释放');
-      return { ok: true, stopped: true };
-    }
-  }
-  return {
-    ok: false,
-    reason: sendError
-      ? `发了退出指令但端口一直没释放（${sendError}）—— 你的接口可能不支持 /control`
-      : '发了退出指令，但端口一直没释放'
-  };
+function stopApiServer() {
+  return Promise.resolve({ ok: true, already: true, reason: '语音接口归 comfy-dafeiyu 管，这里不会关它' });
 }
 
 // ── 音色配置：插件设置优先，其次复用外部音色配置文件 ──────────────────────
@@ -973,15 +872,12 @@ export function setup(api) {
   }
   const self = probe(true);
   const label = modeLabel(s.voiceMode);
-  rtLog('加载', `已加载（${label}，上限 ${s.maxChars} 字，每分钟 ${s.maxPerMinute} 条，自动启动接口=${s.autoStartApi ? '开' : '关'}）`
+  rtLog('加载', `已加载（${label}，上限 ${s.maxChars} 字，每分钟 ${s.maxPerMinute} 条，接口由 comfy-dafeiyu 管理）`
     + (self.ok ? '' : `；尚未配置好 → ${self.reason}`));
   log(`已加载：文字回复 → 语音（${label}，API ${s.apiUrl}，上限 ${s.maxChars} 字，每分钟 ${s.maxPerMinute} 条）`
     + (self.ok ? '' : `；⚠️ 还没配置好 → ${self.reason}`));
 
-  // 配置齐全 + 开关开着时，趁着空闲把语音接口先拉起来 —— 这样重启电脑后
-  // 用户只要开 QQ Agent，等真正要发语音时接口已经热好了，不用再管第二个程序。
-  // 关掉插件开关就**不再拉**（否则会出现"我在界面上关了它，重启后接口又冒出来占着端口"）。
-  if (self.ok && s.voiceMode !== 'off' && s.autoStartApi && skillEnabledByConfig()) {
+  if (self.ok && s.voiceMode !== 'off' && skillEnabledByConfig()) {
     ensureApiServer(s).then((r) => {
       if (!r.ok) rtLog('接口', `当前不可用：${r.error || '未知原因'}`);
     }).catch(() => {});
@@ -1000,10 +896,9 @@ export function setup(api) {
  */
 export function available() {
   const p = probe();
-  // 顺手推一把自动启动（不阻塞、不等待；ensureApiServer 内部有并发与退避保护）
   if (p.ok) {
     const s = settings();
-    if (s.voiceMode !== 'off' && s.autoStartApi && skillEnabledByConfig() && !G.server.ok && !G.server.starting) {
+    if (s.voiceMode !== 'off' && skillEnabledByConfig() && !G.server.ok) {
       ensureApiServer(s).catch(() => {});
     }
   }
@@ -1014,8 +909,7 @@ export function activate() {
   installPatch();
   const s = settings();
   if (!probe().ok || !skillEnabledByConfig()) return;
-  // 用户刚把开关打开：接口没在跑就把它拉起来
-  if (s.voiceMode !== 'off' && s.autoStartApi) ensureApiServer(s).catch(() => {});
+  if (s.voiceMode !== 'off') ensureApiServer(s).catch(() => {});
 }
 
 export function promptSections() {
@@ -1029,24 +923,9 @@ export function promptSections() {
   }];
 }
 
-/**
- * 插件开关关掉时：把语音接口也一起关掉（开关 = 控制）。
- *
- * ⚠️ 必须区分两种调用，否则会出大问题：
- *   · 核心**热重载**会带 `{reason:'reload'}` 调它 —— 那只是换一份代码，不是用户关了插件。
- *     顺手停接口的后果是"每改一次插件文件，接口就被打断一次，还得再等 40 秒重载模型"。
- *   · 用户在界面上关掉开关时，context 里**没有** reason —— 那才是真的要停。
- *
- * 停的方式是让接口自己退出（`/control?command=exit`），不是杀进程；
- * 接口不在本机时不动它。补丁本身不摘：它每次都会问 isSkillActive，关掉就自动放行文字。
- */
-export function deactivate(ctx = {}) {
-  if (ctx && ctx.reason === 'reload') return;
-  if (!userConfigured()) return;
-  const s = settings();
-  stopApiServer(s).then((r) => {
-    if (!r.ok) rtLog('停止', `没有关掉语音接口：${r.reason}`);
-  }).catch(() => { /* 关不掉也不该影响别的 */ });
+/** 关掉插件只停止“把文字念成语音”，不结束 comfy-dafeiyu 里的接口。 */
+export function deactivate() {
+  // 接口跟着 comfy-dafeiyu 退出，不在这里关。
 }
 
 /** 卸载插件时核心会重载模块，这里无需手工还原原型（还原反而可能把别人的补丁一起摘掉）。 */

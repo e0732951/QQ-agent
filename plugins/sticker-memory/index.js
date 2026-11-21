@@ -84,6 +84,9 @@ const MAX_NOTE_CHARS = 400;
 const MAX_VALUE_CHARS = 180;
 
 const REMEMBER_TOOL = 'sticker-memory__remember_image';
+const OBJECTIVE_NOTE = 'note 只写详细的客观画面：主体、动作、场景、颜色、构图，以及图上能看清的文字（照抄）。不要写好不好看、好不好笑、你喜不喜欢、像什么心情。这段话只留在本地，不要发到群里。';
+const VIEW_HINT = `【看图之后】先不要调用 send_message。先调用 ${REMEMBER_TOOL} 把画面记下来，${OBJECTIVE_NOTE}记完之后，再结合【已读信息】和【未读信息】里大家正在聊的事一起回复，不要一看到图就单独评价这张图。`;
+const SUBJECTIVE_RE = /我觉得|我认为|感觉很|好可[爱笑]|好好[看笑]|太[可爱萌]|我?喜欢|讨厌|哈哈|笑死|无语|绝了|心疼|好甜|好看|难看|好帅|好美|萌死|搞笑|有趣|无聊|离谱/;
 const FORGET_TOOL = 'sticker-memory__forget_cached_image';
 
 /** 与 plugin.json 的 settings 保持一致（留一份是为了加载顺序与容错）。 */
@@ -189,6 +192,15 @@ function clamp(n, lo, hi, fallback) {
 
 function clean(s, max = MAX_NOTE_CHARS) {
   return String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/** 丢掉带主观评价的句子。图上照抄的文字保留。全被丢掉时返回空串，调用方要求重写。 */
+function objectiveNote(raw) {
+  const text = clean(raw);
+  if (!text) return '';
+  const parts = text.split(/(?<=[。！？!?；;])/).map((s) => s.trim()).filter(Boolean);
+  const kept = (parts.length ? parts : [text]).filter((s) => /图上|写着|文字/.test(s) || !SUBJECTIVE_RE.test(s));
+  return clean(kept.join(''));
 }
 
 /** 提示词里的值要防注入：去掉换行/方括号，避免被当成系统指令。 */
@@ -985,7 +997,7 @@ export const hooks = {
           `【本地资料库】本轮有 ${known.length} 条图片或视频已经看过，描述如下（直接用，不用再看）：`,
           ...known.slice(0, 8).map((k) => `- 消息 #${k.entryId}（${kindLabel(k.kind)}）：${safeValue(k.note)}`)
         ];
-        lines.push(`这些不要调用 get_message_images、get_sticker_image 或 read_video。第一次见到的，看完后调用 ${REMEMBER_TOOL} 把描述记下来。`);
+        lines.push(`这些不要调用 get_message_images、get_sticker_image 或 read_video。第一次见到的，看完后先调用 ${REMEMBER_TOOL} 记下客观画面，再结合上下文一起回复，不要一看到图就发消息。`);
         appendToMessage(messages[idx], `\n\n${lines.join('\n')}`);
       }
 
@@ -1114,7 +1126,7 @@ export const hooks = {
       const args = safeParse(argsRaw);
 
       if (name === 'save_description') {
-        const text = clean(args.text || args.note);
+        const text = objectiveNote(args.text || args.note);
         let newest = null;
         for (const [, rec] of st.viewed) {
           if (rec?.kind !== 'video' || nowMs() - rec.at > MIN_VIEW_LINK_MS) continue;
@@ -1162,6 +1174,7 @@ export const hooks = {
         }
       }
       st.viewed.set(mid, { at: nowMs(), localId, keys: picked, kind: wantVideo ? 'video' : 'image' });
+      appendViewHint(result);
       void session;
     } catch (error) {
       warn(`after-tool 记录指纹失败（不影响对话）：${error?.message ?? error}`);
@@ -1206,6 +1219,21 @@ function lastUserIndex(messages) {
 }
 
 /** 往一条消息追加文本（content 可能是字符串或 parts 数组，两种都要照顾）。 */
+function appendViewHint(result) {
+  if (!result || result.isError) return;
+  if (typeof result.content === 'string') {
+    if (!result.content.includes('【看图之后】')) result.content += `\n${VIEW_HINT}`;
+    return;
+  }
+  if (!Array.isArray(result.content)) return;
+  const text = result.content.find((p) => p && p.type === 'text' && typeof p.text === 'string');
+  if (text) {
+    if (!text.text.includes('【看图之后】')) text.text += `\n${VIEW_HINT}`;
+    return;
+  }
+  result.content.unshift({ type: 'text', text: VIEW_HINT });
+}
+
 function appendToMessage(message, text) {
   if (!message) return;
   if (typeof message.content === 'string') { message.content += text; return; }
@@ -1292,7 +1320,7 @@ function registerStickerMemoryTools(api) {
     description:
       '把你刚看过的图片或视频的描述记进【本地资料库】。以后同一张图或同一个视频再出现时，系统直接用这段描述，不再看一遍。'
       + '什么时候用：刚用 get_message_images、get_sticker_image 或 read_video 看过一份以前没有描述的图片或视频；或者群友说之前的描述不对，要改写。'
-      + 'note 用一两句写下画面里是什么。这段话只留在本地，不要发到群里。',
+      + OBJECTIVE_NOTE,
     category: 'sticker',
     icon: '🧠',
     parameters: {
@@ -1300,7 +1328,7 @@ function registerStickerMemoryTools(api) {
       properties: {
         note: {
           type: 'string',
-          description: '画面描述，一两句。'
+          description: '详细的客观画面：主体、动作、场景、颜色、构图，以及图上能看清的文字。不要写评价、感受或猜测。'
         },
         scope: {
           type: 'string',
@@ -1318,9 +1346,12 @@ function registerStickerMemoryTools(api) {
       try {
         const c = conf();
         if (!c.enabled) return { content: '错误：本地资料库已经被关掉了，这次不记录。', isError: true };
-        const note = clean(args?.note);
-        if (!note || note.length < 2) {
-          return { content: '错误：note 太短了。请用一两句写下画面里是什么。', isError: true };
+        const note = objectiveNote(args?.note);
+        if (!note || note.length < 8) {
+          return {
+            content: '错误：note 里没有可用的客观描述。请只写看得见的内容：主体、动作、场景、颜色、构图，以及图上的文字。不要写好不好看、好不好笑、你喜不喜欢。',
+            isError: true
+          };
         }
 
         const st = sessionState(ctx?.session?.id, ctx?.chatKey);

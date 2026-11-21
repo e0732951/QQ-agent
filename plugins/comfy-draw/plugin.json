@@ -1,0 +1,72 @@
+{
+  "id": "comfy-draw",
+  "name": "本地生图",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "对方明确要求画画时，用本机 ComfyUI（comfy-dafeiyu，Z-Image Turbo）生成一张图，并直接发到当前聊天。",
+  "author": "本机定制",
+  "entry": "index.js",
+  "permissions": [],
+  "enabledByDefault": true,
+  "capabilities": [],
+  "requires": [],
+  "settings": {
+    "enabled": true,
+    "baseUrl": "http://127.0.0.1:8188",
+    "unetName": "z_image_turbo_bf16.safetensors",
+    "clipName": "qwen_3_4b.safetensors",
+    "vaeName": "ae.safetensors",
+    "width": 1024,
+    "height": 1024,
+    "steps": 8,
+    "timeoutMs": 180000
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用本地生图",
+      "description": "关闭后不再响应画画请求。ComfyUI 本身不会被关掉。"
+    },
+    "baseUrl": {
+      "type": "string",
+      "label": "ComfyUI 地址",
+      "description": "本机 comfy-dafeiyu 的界面地址。默认 http://127.0.0.1:8188。"
+    },
+    "unetName": {
+      "type": "string",
+      "label": "UNET 文件名",
+      "description": "与当前已跑通的工作流一致。换模型时改成 ComfyUI 里看得到的文件名。"
+    },
+    "clipName": {
+      "type": "string",
+      "label": "CLIP 文件名",
+      "description": "默认 qwen_3_4b.safetensors，类型 lumina2。"
+    },
+    "vaeName": {
+      "type": "string",
+      "label": "VAE 文件名",
+      "description": "默认 ae.safetensors。"
+    },
+    "width": {
+      "type": "number",
+      "label": "默认宽度",
+      "description": "512 到 1024，会按 16 对齐。3070 8GB 上 1024 已经跑通过。"
+    },
+    "height": {
+      "type": "number",
+      "label": "默认高度",
+      "description": "512 到 1024，会按 16 对齐。"
+    },
+    "steps": {
+      "type": "number",
+      "label": "采样步数",
+      "description": "Z-Image Turbo 用 8 步。不要调大，8GB 显存容易拖很久。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "最长等待（毫秒）",
+      "description": "超时后撤掉这一次排队。默认 180000。"
+    }
+  }
+}

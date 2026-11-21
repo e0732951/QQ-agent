@@ -9,22 +9,12 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { DATA_DIR } from '../../src/config.js';
 
 const ID = 'sovits-speech-to-text';
-const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url));
-const ASR_SCRIPT = path.join(PLUGIN_DIR, 'asr_server.py');
 const WORK_DIR = path.join(DATA_DIR, ID, 'inbox');
 const RUN_LOG = path.join(DATA_DIR, ID, 'runtime.log');
-const API_LOG = path.join(DATA_DIR, ID, 'asr-server.log');
 const DEFAULT_API = 'http://127.0.0.1:9881';
-
-const MODELS = {
-  asr: 'tools/asr/models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch',
-  vad: 'tools/asr/models/speech_fsmn_vad_zh-cn-16k-common-pytorch'
-};
 
 const G = (globalThis.__sovitsSpeechToText = globalThis.__sovitsSpeechToText || {
   cfgOf: null,
@@ -34,7 +24,6 @@ const G = (globalThis.__sovitsSpeechToText = globalThis.__sovitsSpeechToText || 
 });
 if (!G.server) G.server = { ok: false, at: 0, attempts: 0, lastTryAt: 0, starting: null, lastError: '' };
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errText = (e) => String(e?.message ?? e);
 
 function rtLog(tag, message) {
@@ -66,21 +55,13 @@ function settings() {
   };
 }
 
-function modelPaths(workDir) {
-  return {
-    asr: path.join(workDir, MODELS.asr),
-    vad: path.join(workDir, MODELS.vad)
-  };
-}
-
 function readiness() {
   const s = settings();
-  if (!s.pythonPath || !fs.existsSync(s.pythonPath)) return { ok: false, reason: `找不到 python：${s.pythonPath || '(未设置)'}` };
-  if (!fs.existsSync(ASR_SCRIPT)) return { ok: false, reason: '找不到 asr_server.py' };
-  if (!s.apiWorkDir || !fs.existsSync(s.apiWorkDir)) return { ok: false, reason: `找不到 GPT-SoVITS 根目录：${s.apiWorkDir || '(未设置)'}` };
-  const models = modelPaths(s.apiWorkDir);
-  for (const [name, file] of Object.entries(models)) {
-    if (!fs.existsSync(path.join(file, 'model.pt'))) return { ok: false, reason: `找不到${name}模型：${file}` };
+  try {
+    const url = new URL(s.asrUrl);
+    if (!url.hostname) return { ok: false, reason: '识别服务地址没有主机名' };
+  } catch {
+    return { ok: false, reason: `识别服务地址无效：${s.asrUrl}` };
   }
   return { ok: true, reason: '' };
 }
@@ -114,105 +95,17 @@ async function fetchJson(url, options, timeoutMs) {
   return body;
 }
 
-function startServer(c) {
-  G.server.starting = (async () => {
-    G.server.lastTryAt = Date.now();
-    G.server.attempts += 1;
-    let fd = null;
-    try {
-      const check = readiness();
-      if (!check.ok) throw new Error(check.reason);
-      const url = new URL(c.asrUrl);
-      const models = modelPaths(c.apiWorkDir);
-      fs.mkdirSync(path.dirname(API_LOG), { recursive: true });
-      fd = fs.openSync(API_LOG, 'a');
-      const child = spawn(c.pythonPath, ['-u', '-s', ASR_SCRIPT], {
-        cwd: c.apiWorkDir,
-        detached: true,
-        windowsHide: true,
-        env: {
-          ...process.env,
-          PYTHONIOENCODING: 'utf-8',
-          PYTHONUTF8: '1',
-          ASR_HOST: url.hostname || '127.0.0.1',
-          ASR_PORT: String(url.port || '9881'),
-          ASR_DEVICE: c.device,
-          ASR_WORKDIR: c.apiWorkDir,
-          ASR_MODEL: models.asr,
-          ASR_VAD: models.vad
-        },
-        stdio: ['ignore', fd, fd]
-      });
-      child.unref();
-      rtLog('启动', `已拉起识别服务（pid ${child.pid}）`);
-      const deadline = Date.now() + c.apiStartTimeoutMs;
-      while (Date.now() < deadline) {
-        await sleep(1500);
-        if (await probePort(c, 800)) {
-          G.server.ok = true;
-          G.server.at = Date.now();
-          G.server.attempts = 0;
-          G.server.lastError = '';
-          rtLog('启动', `识别服务已就绪（用了约 ${Math.round((Date.now() - G.server.lastTryAt) / 1000)} 秒）`);
-          return { ok: true };
-        }
-      }
-      throw new Error(`等了 ${Math.round(c.apiStartTimeoutMs / 1000)} 秒识别服务还没起来，看 ${API_LOG}`);
-    } catch (error) {
-      const msg = errText(error);
-      G.server.ok = false;
-      G.server.lastError = msg;
-      rtLog('启动失败', msg);
-      try { G.warn?.(msg); } catch { /* ignore */ }
-      return { ok: false, error: msg };
-    } finally {
-      try { if (fd !== null) fs.closeSync(fd); } catch { /* 子进程已拿到句柄 */ }
-      G.server.starting = null;
-    }
-  })();
-  return G.server.starting;
-}
-
 async function ensureServer(c) {
-  if (G.server.starting) return G.server.starting;
   const up = await probePort(c);
   G.server.ok = up;
   G.server.at = Date.now();
-  if (up) return { ok: true };
-  if (!c.autoStartApi) return { ok: false, error: '识别服务没在运行（自动启动是关的）' };
-  const backoff = [60000, 300000, 900000][Math.min(G.server.attempts, 2)];
-  const waited = Date.now() - G.server.lastTryAt;
-  if (G.server.attempts > 0 && waited < backoff) {
-    const left = Math.ceil((backoff - waited) / 1000);
-    return { ok: false, error: `上次启动失败（${G.server.lastError || '见 asr-server.log'}），${left} 秒后再试` };
+  if (up) {
+    G.server.lastError = '';
+    return { ok: true };
   }
-  return startServer(c);
-}
-
-function isLocal(c) {
-  try {
-    const h = String(new URL(c.asrUrl).hostname || '').toLowerCase();
-    return h === '127.0.0.1' || h === 'localhost' || h === '::1';
-  } catch {
-    return false;
-  }
-}
-
-async function stopServer(c) {
-  if (!isLocal(c)) return;
-  if (!(await probePort(c, 800))) { G.server.ok = false; return; }
-  try { await fetchJson(`${c.asrUrl}/control?command=exit`, {}, 8000); } catch { /* 进程先退出时连接会被重置 */ }
-  for (let i = 0; i < 20; i++) {
-    await sleep(300);
-    if (!(await probePort(c, 400))) {
-      G.server.ok = false;
-      G.server.attempts = 0;
-      G.server.lastError = '';
-      rtLog('停止', '识别服务已退出');
-      return;
-    }
-  }
-  rtLog('停止', '发了退出指令，但端口还在');
+  const error = '识别服务没在运行。它由 comfy-dafeiyu 启动，请先打开那个项目。';
+  G.server.lastError = error;
+  return { ok: false, error };
 }
 
 function decodeFileUrl(value) {
@@ -338,26 +231,21 @@ export function setup(api) {
   G.log = (...a) => api.log?.(...a);
   G.warn = (...a) => (api.warn ?? api.log)?.(...a);
   const check = readiness();
-  rtLog('加载', check.ok ? '已加载' : `还没配好：${check.reason}`);
-  if (check.ok && settings().autoStartApi) ensureServer(settings()).catch(() => {});
+  rtLog('加载', check.ok ? '已加载（识别服务由 comfy-dafeiyu 管理）' : `还没配好：${check.reason}`);
+  if (check.ok) ensureServer(settings()).catch(() => {});
 }
 
 export function available() {
-  const check = readiness();
-  if (check.ok && settings().autoStartApi && !G.server.ok && !G.server.starting) {
-    ensureServer(settings()).catch(() => {});
-  }
-  return check;
+  return readiness();
 }
 
 export function activate() {
   const check = readiness();
-  if (check.ok && settings().autoStartApi) ensureServer(settings()).catch(() => {});
+  if (check.ok) ensureServer(settings()).catch(() => {});
 }
 
-export function deactivate(ctx = {}) {
-  if (ctx && ctx.reason === 'reload') return;
-  stopServer(settings()).catch(() => {});
+export function deactivate() {
+  // 识别服务跟着 comfy-dafeiyu 退出，不在这里关。
 }
 
 export function dispose() { /* 热重载由加载器处理 */ }

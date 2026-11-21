@@ -161,7 +161,7 @@ function qqSceneRules() {
   ];
   if (vision) {
     lines.push(
-      '- 消息里出现 [图片] / [表情]，或要用某个没备注的收藏表情时，可以用 get_message_images / get_sticker_image 看图（你能直接看懂图片内容），再自然回应；不要假装看不到图，也不要编造图片内容；工具获取失败就老实说看不到。'
+      '- 消息里出现 [图片] / [表情]，或要用某个没备注的收藏表情时，先用 get_message_images / get_sticker_image 看图。看完不要马上发言：先把画面记成不含评价的客观描述，再结合当前聊天一起回复，不要单独评价这张图。不要假装看不到图，也不要编造图片内容；工具获取失败就老实说看不到。'
     );
   } else {
     lines.push(

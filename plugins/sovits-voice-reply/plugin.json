@@ -4,7 +4,7 @@
   "version": "1.5.0",
   "apiVersion": 1,
   "category": "media",
-  "description": "把机器人的回复用本机 GPT-SoVITS 音色念成 QQ 语音。发送档位：强、中、弱由模型自己决定（只在某条消息开头写了「【语音】」时才念，三档只改变它念得多勤），all 一直把适合朗读的回复念出来，off 一律打字。**插件开关就是语音接口的开关**：打开时接口没在运行会自动帮你拉起来，关掉时会让接口自己退出、释放端口和显存。太长、含链接/代码/路径等不适合朗读的内容仍按文字发；合成或发送失败会自动退回文字，消息不会丢。",
+  "description": "把机器人的回复用 comfy-dafeiyu 里的 GPT-SoVITS 音色念成 QQ 语音。语音接口随那个项目启动和退出，本插件只负责调用，不再自己拉起或关掉进程。发送档位：强、中、弱由模型自己决定（只在某条消息开头写了「【语音】」时才念），all 一直把适合朗读的回复念出来，off 一律打字。太长、含链接/代码/路径等不适合朗读的内容仍按文字发；合成或发送失败会自动退回文字，消息不会丢。",
   "author": "本机定制",
   "entry": "index.js",
   "permissions": [
@@ -17,7 +17,7 @@
   "requires": [],
   "settings": {
     "apiUrl": "http://127.0.0.1:9880",
-    "autoStartApi": true,
+    "autoStartApi": false,
     "pythonPath": "",
     "apiScriptPath": "",
     "apiWorkDir": "",
@@ -52,23 +52,23 @@
     },
     "autoStartApi": {
       "type": "boolean",
-      "label": "接口没运行时自动帮你启动",
-      "description": "默认开。开机后只要开 QQ Agent，插件会自己在后台把 GPT-SoVITS 语音接口拉起来（不弹黑窗口），你不用再手动开第二个程序。想自己控制、不想让它常驻就关掉，然后双击 GPT-SoVITS 目录里的「启动语音接口.bat」。"
+      "label": "（已停用）不再由这里启动接口",
+      "description": "语音接口改由 comfy-dafeiyu 启动和关闭。这个开关不再拉起进程，也不再在关掉插件时结束接口。"
     },
     "pythonPath": {
       "type": "string",
-      "label": "python 解释器路径（想自动启动才填）",
-      "description": "留空 = 不自动启动，你自己先开好 GPT-SoVITS 接口就行。想让它自动启动就填：整合包一般是 <GPT-SoVITS 根目录>\\runtime\\python.exe。"
+      "label": "（已停用）python 路径",
+      "description": "不再使用。启动参数在 comfy-dafeiyu\\gpt-sovits\\bridge.json。"
     },
     "apiScriptPath": {
       "type": "string",
-      "label": "api_v2.py 路径（想自动启动才填）",
-      "description": "GPT-SoVITS 的接口脚本。整合包一般是 <GPT-SoVITS 根目录>\\api_v2.py。留空 = 不自动启动。"
+      "label": "（已停用）api_v2.py 路径",
+      "description": "不再使用。启动参数在 comfy-dafeiyu\\gpt-sovits\\bridge.json。"
     },
     "apiWorkDir": {
       "type": "string",
-      "label": "GPT-SoVITS 根目录（想自动启动就填）",
-      "description": "必须是 api_v2.py 所在那一层（脚本里的模型路径都相对它写）。两个用处：① 自动启动接口时的工作目录；② 上面填**相对路径**的权重时按它解析 —— 底模文档里给的就是相对路径，填了它就能直接照抄。"
+      "label": "GPT-SoVITS 根目录",
+      "description": "只用来把相对路径的权重解析成绝对路径。接口本身由 comfy-dafeiyu 启动。"
     },
     "apiStartTimeoutMs": {
       "type": "number",
