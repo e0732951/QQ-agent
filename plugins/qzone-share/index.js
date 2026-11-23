@@ -113,18 +113,27 @@ function parseIdea(raw) {
   const text = String(raw || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('模型没有返回 JSON');
-  const data = JSON.parse(text.slice(start, end + 1));
-  const caption = String(data.text || data.caption || '').replace(/\s+/g, ' ').trim().slice(0, 140);
-  const image = String(data.image || data.prompt || '').replace(/\s+/g, ' ').trim().slice(0, 500);
-  if (caption.length < 2 || image.length < 4) throw new Error('说说或画面描述太短');
-  return { caption, image };
+  if (start >= 0 && end > start) {
+    const data = JSON.parse(text.slice(start, end + 1));
+    const caption = String(data.text || data.caption || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+    const image = String(data.image || data.prompt || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (caption.length >= 2 && image.length >= 4) return { caption, image };
+  }
+  const caption = text.replace(/\s+/g, ' ').trim().slice(0, 140);
+  if (caption.length < 2) {
+    const preview = text.replace(/\s+/g, ' ').trim().slice(0, 80);
+    throw new Error(preview ? `模型没有写出说说：${preview}` : '模型返回是空的');
+  }
+  return { caption, image: `日常小景，${caption}，柔和自然光，没有画面文字` };
 }
 
 function replyText(response) {
-  const content = response?.choices?.[0]?.message?.content ?? response?.content ?? '';
+  const message = response?.message ?? response?.choices?.[0]?.message ?? {};
+  const content = message.content ?? response?.content ?? '';
   if (typeof content === 'string') return content;
-  if (Array.isArray(content)) return content.map((part) => part?.text || '').join('');
+  if (Array.isArray(content)) {
+    return content.map((part) => (typeof part === 'string' ? part : part?.text || '')).join('');
+  }
   return '';
 }
 
@@ -145,7 +154,8 @@ async function invent(state) {
       }
     ],
     temperature: 0.9,
-    maxTokens: 300
+    maxTokens: 600,
+    skillContext: { thinkingMode: 'off' }
   });
   return parseIdea(replyText(response));
 }
@@ -313,9 +323,16 @@ async function tick() {
 
 function startLoop() {
   if (G.timer) clearInterval(G.timer);
-  G.timer = setInterval(() => { tick().catch(() => {}); }, 60 * 1000);
+  if (G.kick) clearTimeout(G.kick);
+  const gen = (G.gen = (G.gen || 0) + 1);
+  const run = () => {
+    if (G.gen !== gen) return;
+    tick().catch((error) => log(`调度出错：${error?.message ?? error}`));
+  };
+  G.timer = setInterval(run, 60 * 1000);
   G.timer.unref?.();
-  setTimeout(() => { tick().catch(() => {}); }, 8000).unref?.();
+  G.kick = setTimeout(run, 8000);
+  G.kick.unref?.();
   log('调度已启动');
 }
 

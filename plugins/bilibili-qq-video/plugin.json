@@ -29,7 +29,7 @@
     "maxMinutes": {
       "type": "number",
       "label": "最长看几分钟",
-      "description": "超过此时长的视频不下载。默认 15。"
+      "description": "超过此时长就只下载并看片头这一段。默认 15。"
     },
     "maxMb": {
       "type": "number",

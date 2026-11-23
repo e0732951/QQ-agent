@@ -3,6 +3,7 @@
 // 下到本地文件后，交给现有的视频读取（当前是 length-frame-reader 抽帧）。
 
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -290,16 +291,24 @@ function pickUrls(play) {
     .sort((a, b) => rankCdn(a) - rankCdn(b));
 }
 
-async function playUrl(info) {
+async function playUrl(info, { small = false } = {}) {
   const idQuery = info.bvid
     ? `bvid=${encodeURIComponent(info.bvid)}`
     : `avid=${encodeURIComponent(info.aid)}`;
   const base = `https://api.bilibili.com/x/player/playurl?${idQuery}&cid=${info.cid}`;
-  const tries = [
-    `${base}&qn=80&fnval=16&fourk=0`,
-    `${base}&qn=64&fnval=1&platform=html5&high_quality=1`
-  ];
+  // 超过时长上限时先要低清晰度，整段才能塞进体积上限，后面再裁成前一段。
+  const tries = small
+    ? [
+      `${base}&qn=32&fnval=1&platform=html5`,
+      `${base}&qn=64&fnval=1&platform=html5&high_quality=1`,
+      `${base}&qn=80&fnval=16&fourk=0`
+    ]
+    : [
+      `${base}&qn=80&fnval=16&fourk=0`,
+      `${base}&qn=64&fnval=1&platform=html5&high_quality=1`
+    ];
   let last = '取播放地址失败';
+  let fallback = [];
   for (const url of tries) {
     const play = await getJson(url);
     if (play.code !== 0) {
@@ -307,9 +316,15 @@ async function playUrl(info) {
       continue;
     }
     const found = pickUrls(play);
-    if (found.length) return found;
-    last = '这个视频没有可下载的画面流';
+    if (!found.length) {
+      last = '这个视频没有可下载的画面流';
+      continue;
+    }
+    // 证书对得上的 B站 CDN 优先。只有镜像站时继续问下一种清晰度。
+    if (found.some((u) => rankCdn(u) === 0)) return found;
+    if (!fallback.length) fallback = found;
   }
+  if (fallback.length) return fallback;
   throw new Error(last);
 }
 
@@ -330,7 +345,16 @@ function allowedCdn(url) {
 
 async function downloadTo(url, dest, maxBytes) {
   if (!allowedCdn(url)) throw new Error(`播放地址不在 B站 CDN（${cdnHost(url) || '无法解析'}）`);
-  const res = await fetch(url, { headers: biliHeaders(await guestCookie()), redirect: 'follow' });
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': UA,
+      referer: 'https://www.bilibili.com/',
+      accept: '*/*',
+      // 不带 Range 时，B站 CDN 直接回 567 的网页，而不是视频。
+      range: 'bytes=0-'
+    },
+    redirect: 'follow'
+  });
   if (!res.ok || !res.body) throw new Error(`视频下载 HTTP ${res.status}`);
   if (!allowedCdn(res.url || url)) throw new Error(`播放地址跳到了 B站以外（${cdnHost(res.url || url) || '无法解析'}）`);
   const declared = Number(res.headers.get('content-length') || 0);
@@ -362,6 +386,45 @@ async function downloadTo(url, dest, maxBytes) {
   return dest;
 }
 
+function ffmpegBin() {
+  const known = 'D:\\modules\\ffmpeg-2026-06-10-git-b29bdd3715-essentials_build\\bin\\ffmpeg.exe';
+  if (fs.existsSync(known)) return known;
+  return 'ffmpeg';
+}
+
+function runFfmpeg(args, timeoutMs) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(ffmpegBin(), args, { windowsHide: true, stdio: 'ignore' });
+    } catch {
+      resolve(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* 超时停掉 */ }
+      resolve(false);
+    }, timeoutMs);
+    child.on('error', () => { clearTimeout(timer); resolve(false); });
+    child.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
+  });
+}
+
+/** 只保留片头。裁失败就留下整段，调用方已经按体积上限下过了。 */
+async function clipTo(src, seconds) {
+  const out = src.replace(/\.mp4$/i, '') + '.clip.mp4';
+  const ok = await runFfmpeg([
+    '-y', '-i', src, '-t', String(seconds), '-c', 'copy', '-movflags', '+faststart', out
+  ], 120000);
+  if (!ok || !fs.existsSync(out) || fs.statSync(out).size < 1024) {
+    try { fs.unlinkSync(out); } catch { /* 没有半截文件 */ }
+    return false;
+  }
+  try { fs.unlinkSync(src); } catch { /* 原文件删不掉也用裁好的 */ }
+  fs.renameSync(out, src);
+  return true;
+}
+
 export async function fetchBilibiliFile({ bvid = '', aid = '', pageUrl = '' } = {}) {
   const given = noteKeys({ bvid, aid, pageUrl });
   const early = findNote(given);
@@ -371,14 +434,12 @@ export async function fetchBilibiliFile({ bvid = '', aid = '', pageUrl = '' } = 
   const again = findNote(resolved);
   if (again) return { remembered: true, description: again.text, title: again.title || info.title };
   const limitMin = settings().maxMinutes;
-  if (info.duration > limitMin * 60) {
-    throw new Error(`这个视频有 ${Math.ceil(info.duration / 60)} 分钟，超过 ${limitMin} 分钟，不下载`);
-  }
+  const over = info.duration > limitMin * 60;
   const key = (info.bvid || (info.aid ? `av${info.aid}` : '') || 'clip').replace(/[^\w.-]/g, '_');
   const dest = path.join(cacheDir(), `${key}.mp4`);
   if (!(fs.existsSync(dest) && fs.statSync(dest).size > 1024)) {
-    const url = await playUrl(info);
-    let last = '视频下载失败';
+    const url = await playUrl(info, { small: over });
+    const fails = [];
     let saved = false;
     for (const one of url) {
       try {
@@ -386,15 +447,20 @@ export async function fetchBilibiliFile({ bvid = '', aid = '', pageUrl = '' } = 
         saved = true;
         break;
       } catch (error) {
-        last = error?.cause?.code === 'ERR_TLS_CERT_ALTNAME_INVALID'
+        const msg = error?.cause?.code === 'ERR_TLS_CERT_ALTNAME_INVALID'
           ? `CDN 证书对不上（${cdnHost(one)}）`
-          : (error?.message || last);
+          : (error?.message || '下载失败');
+        fails.push(`${cdnHost(one) || '未知'}: ${msg}`);
         try { if (fs.existsSync(dest)) fs.unlinkSync(dest); } catch { /* 半截文件删掉 */ }
       }
     }
-    if (!saved) throw new Error(last);
+    if (!saved) throw new Error(fails.join('；') || '视频下载失败');
+    if (over) await clipTo(dest, limitMin * 60);
   }
-  lastFetch = { keys: [...new Set([...given, ...resolved])], title: info.title || '', filePath: dest };
+  const title = over
+    ? `${info.title || 'B站视频'}（片长 ${Math.ceil(info.duration / 60)} 分钟，只看了前 ${limitMin} 分钟）`
+    : (info.title || '');
+  lastFetch = { keys: [...new Set([...given, ...resolved])], title, filePath: dest };
   return dest;
 }
 

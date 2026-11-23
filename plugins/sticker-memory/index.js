@@ -203,6 +203,11 @@ function objectiveNote(raw) {
   return clean(kept.join(''));
 }
 
+/** 没看到画面时写的说明，不能当成这条视频的描述，否则以后会一直跳过下载。 */
+function unseenNote(note) {
+  return /未能获取|无法获取|打不开|看不到画面|画面内容未知|没有画面|没有视频文件/.test(String(note || ''));
+}
+
 /** 提示词里的值要防注入：去掉换行/方括号，避免被当成系统指令。 */
 function safeValue(s, max = MAX_VALUE_CHARS) {
   return clean(s, max).replace(/[[\]{}<>]/g, '').trim();
@@ -1036,7 +1041,11 @@ export const hooks = {
         const rec = localId ? st.resolved.get(localId) : null;
         const cached = resolvedItems(rec).find((it) => it.media === video);
         const keys = cached?.keys || await resolveVideoKeys(video, Math.min(c.maxDownloadMs, 2500));
-        const entry = keys && lookupByKeys(keysToObject(keys));
+        let entry = keys && lookupByKeys(keysToObject(keys));
+        if (entry && unseenNote(entry.note)) {
+          forgetEntry(keys);
+          entry = null;
+        }
         if (entry && validForChat(entry)) {
           markHit(entry, chatKey);
           if (localId && keys) addResolved(st, localId, { keys, media: video });
@@ -1347,6 +1356,12 @@ function registerStickerMemoryTools(api) {
         const c = conf();
         if (!c.enabled) return { content: '错误：本地资料库已经被关掉了，这次不记录。', isError: true };
         const note = objectiveNote(args?.note);
+        if (unseenNote(note)) {
+          return {
+            content: '错误：这次没有看到画面，不要把“没看到”记成这条视频的描述。',
+            isError: true
+          };
+        }
         if (!note || note.length < 8) {
           return {
             content: '错误：note 里没有可用的客观描述。请只写看得见的内容：主体、动作、场景、颜色、构图，以及图上的文字。不要写好不好看、好不好笑、你喜不喜欢。',
