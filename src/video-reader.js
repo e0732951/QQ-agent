@@ -175,6 +175,8 @@ export class VideoReader {
     if (located && typeof located === 'object' && located.remembered) {
       out.routeReason = '保存期内已有描述，不再下载';
       out.note = `这条 B站视频在保存期内看过，视频和截图已经删了。当时记下的描述：\n${located.description}`;
+      const lines = await this.#lines(media, null);
+      if (lines) out.note += `\n【视频台词】\n${lines}`;
       return out;
     }
     filePath = typeof located === 'string' ? located : null;
@@ -235,6 +237,8 @@ export class VideoReader {
     }
 
     out.note = this.#buildNote(out, { hasFile });
+    const lines = await this.#lines(media, filePath);
+    if (lines) out.note += `\n【视频台词】\n${lines}`;
     return out;
     } finally {
       if (bili && filePath) {
@@ -242,6 +246,22 @@ export class VideoReader {
         if (hint) out.note += `\n${hint}`;
       }
     }
+  }
+
+  /**
+   * 把视频里的声音转成台词。能力由语音转文字插件提供。
+   * 失败不影响画面：没有这段台词时，看视频仍按原来的方式返回。
+   */
+  async #lines(media, filePath) {
+    const providers = skillManager.getCapabilityProviders('video.transcript', {});
+    for (const p of providers) {
+      try {
+        const got = await p.fn({ media, filePath: filePath || '' });
+        const text = String(got?.text || '').trim();
+        if (text) return text;
+      } catch { /* 转写失败就当这次没有台词 */ }
+    }
+    return '';
   }
 
   /** B站小程序视频看完就删本地文件。抽帧图片由抽帧插件在交画面时删掉。 */

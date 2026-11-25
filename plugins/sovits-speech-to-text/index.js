@@ -5,6 +5,8 @@
 // 语音只显示成 [语音]。这里提供那个能力，失败一律返回 ok:false，核心退回占位，
 // 消息不会因为识别出错而丢失。
 
+import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import net from 'node:net';
@@ -226,6 +228,163 @@ async function transcribeFile(c, file) {
   return String(body.text || '').trim();
 }
 
+const LINES_FILE = path.join(DATA_DIR, ID, 'video-lines.json');
+const LINE_CAP_SEC = 15 * 60;
+
+function ffmpegBin() {
+  const known = 'D:\\modules\\ffmpeg-2026-06-10-git-b29bdd3715-essentials_build\\bin\\ffmpeg.exe';
+  if (fs.existsSync(known)) return known;
+  return 'ffmpeg';
+}
+
+function runFfmpeg(args, timeoutMs) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(ffmpegBin(), args, { windowsHide: true, stdio: 'ignore' });
+    } catch {
+      resolve(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* 超时停掉 */ }
+      resolve(false);
+    }, timeoutMs);
+    child.on('error', () => { clearTimeout(timer); resolve(false); });
+    child.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
+  });
+}
+
+function lineKeys(media, filePath) {
+  const keys = [];
+  const bvid = String(media?.bvid || '').trim();
+  const aid = String(media?.aid || '').replace(/^av/i, '').trim();
+  const page = String(media?.pageUrl || '').trim();
+  const file = String(media?.file || '').trim();
+  if (bvid) keys.push(bvid, `bv:${bvid}`);
+  if (aid) keys.push(`av${aid}`, `av:${aid}`);
+  if (page) {
+    const hash = crypto.createHash('sha1').update(page).digest('hex').slice(0, 16);
+    keys.push(`url:${hash}`, `url_${hash}`);
+  }
+  if (file) keys.push(`file:${file}`);
+  if (!keys.length && filePath) keys.push(`path:${path.basename(String(filePath))}`);
+  return keys;
+}
+
+function readLineStore() {
+  try {
+    const data = JSON.parse(fs.readFileSync(LINES_FILE, 'utf8'));
+    if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+  } catch { /* 还没有台词存档 */ }
+  return {};
+}
+
+function savedLines(keys) {
+  const data = readLineStore();
+  for (const key of keys) {
+    const text = String(data[key]?.text || '').trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function writeLines(keys, text) {
+  if (!keys.length || !text) return;
+  const data = readLineStore();
+  const item = { text, at: Date.now() };
+  for (const key of keys) data[key] = item;
+  fs.mkdirSync(path.dirname(LINES_FILE), { recursive: true });
+  const tmp = `${LINES_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+  fs.renameSync(tmp, LINES_FILE);
+}
+
+function takePendingAudio(media) {
+  const box = globalThis.__bilibiliQqVideo;
+  const pending = box?.pendingAudio;
+  if (!pending?.path || !fs.existsSync(pending.path)) return '';
+  const page = String(media?.pageUrl || '');
+  const bvid = String(media?.bvid || '');
+  const aid = String(media?.aid || '');
+  const bili = media?.source === 'bilibili-miniapp' || Boolean(bvid);
+  const match = (page && pending.pageUrl === page)
+    || (bvid && pending.bvid === bvid)
+    || (aid && String(pending.aid) === aid)
+    || (bili && Date.now() - Number(pending.at || 0) < 120000);
+  if (!match) return null;
+  box.pendingAudio = null;
+  return pending;
+}
+
+async function toWav(src) {
+  const dest = `${src}.${Date.now().toString(36)}.wav`;
+  const ok = await runFfmpeg([
+    '-y', '-i', src, '-t', String(LINE_CAP_SEC), '-vn', '-ac', '1', '-ar', '16000', dest
+  ], 120000);
+  if (!ok || !fs.existsSync(dest) || fs.statSync(dest).size < 1024) {
+    try { fs.unlinkSync(dest); } catch { /* 没有半截 */ }
+    return '';
+  }
+  return dest;
+}
+
+async function transcribeVideo(file) {
+  const c = settings();
+  const body = await fetchJson(`${c.asrUrl}/asr`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: file })
+  }, 180000);
+  return String(body.text || '').trim();
+}
+
+/** 看视频时转写音轨。文字留下，本次下载或抽出的音频删掉。已有台词就不再下载。 */
+async function transcriptOf({ media, filePath } = {}) {
+  const keys = lineKeys(media, filePath);
+  const saved = savedLines(keys);
+  if (saved) return { text: saved };
+  const owned = [];
+  const pending = takePendingAudio(media);
+  let src = pending?.path || '';
+  if (pending?.bvid && !keys.includes(pending.bvid)) keys.push(pending.bvid);
+  if (pending?.pageUrl) {
+    const hash = crypto.createHash('sha1').update(String(pending.pageUrl)).digest('hex').slice(0, 16);
+    if (!keys.includes(`url_${hash}`)) keys.push(`url_${hash}`);
+  }
+  if (src) owned.push(src);
+  if (!src && filePath && fs.existsSync(String(filePath))) src = String(filePath);
+  if (!src) return { text: '' };
+  const wav = await toWav(src);
+  if (!wav) {
+    for (const f of owned) { try { fs.unlinkSync(f); } catch { /* 已经没了 */ } }
+    return { text: '' };
+  }
+  owned.push(wav);
+  let keepSource = false;
+  try {
+    const server = await ensureServer(settings());
+    if (!server.ok) {
+      keepSource = true;
+      return { text: '' };
+    }
+    const text = await transcribeVideo(wav);
+    const kept = text || '（没有听到人说话）';
+    writeLines(keys, kept);
+    rtLog('视频台词', kept.slice(0, 40));
+    return { text: kept };
+  } catch (error) {
+    keepSource = true;
+    rtLog('视频台词失败', errText(error));
+    return { text: '' };
+  } finally {
+    for (const f of owned) {
+      if (keepSource && f === src) continue;
+      try { fs.unlinkSync(f); } catch { /* 音频用完即删 */ }
+    }
+  }
+}
+
 export function setup(api) {
   G.cfgOf = typeof api.config === 'function' ? api.config : () => ({});
   G.log = (...a) => api.log?.(...a);
@@ -256,7 +415,7 @@ export function promptSections() {
     id: 'sovits-speech-to-text',
     title: '语音消息',
     priority: 35,
-    content: '别人发来的语音如果已经识别出来，会写成「[语音转文字] 后面是原话」。把它当成对方亲口说的话来回应。识别可能有同音错字，意思清楚就按意思回，不要说自己听不到语音。只写着「[语音]」的才是没能识别的语音。'
+    content: '别人发来的语音如果已经识别出来，会写成「[语音转文字] 后面是原话」。把它当成对方亲口说的话来回应。识别可能有同音错字，意思清楚就按意思回，不要说自己听不到语音。只写着「[语音]」的才是没能识别的语音。看视频时结果里的「【视频台词】」是这段视频里说的话，转写完音频就删了，只留这段文字，和画面一起理解。写着「（没有听到人说话）」就是没有人声。超过 15 分钟只转写片头这一段。'
   }];
 }
 
@@ -282,5 +441,6 @@ export const providers = {
     } finally {
       if (owned) { try { await fsp.unlink(owned); } catch { /* 留给下次 */ } }
     }
-  }
+  },
+  'video.transcript': async (args = {}) => transcriptOf(args)
 };

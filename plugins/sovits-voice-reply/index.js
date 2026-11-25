@@ -248,6 +248,50 @@ function probeApiPort(c, timeoutMs = 1500) {
 }
 
 const API_DOWN = '语音接口没在运行。它由 comfy-dafeiyu 启动，请先打开那个项目。';
+const NUDGE_MS = 10 * 60 * 1000;
+const nudgeAt = (globalThis.__comfyNudgeAt = globalThis.__comfyNudgeAt || new Map());
+
+async function groupOwner(onebot, groupId) {
+  const box = globalThis.__qqGroupOwner = globalThis.__qqGroupOwner || new Map();
+  const key = String(groupId);
+  const hit = box.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit;
+  if (!onebot?.call) return hit || null;
+  let list = [];
+  try {
+    const data = await onebot.call('get_group_member_list', { group_id: Number(groupId) });
+    list = Array.isArray(data) ? data : [];
+  } catch {
+    return hit || null;
+  }
+  const owner = list.find((m) => m && m.role === 'owner' && m.user_id != null);
+  if (!owner) return hit || null;
+  const info = {
+    id: String(owner.user_id),
+    name: String(owner.card || owner.nickname || ''),
+    at: Date.now()
+  };
+  box.set(key, info);
+  return info;
+}
+
+/** Comfy 没开、这条本该念出来时，卖萌提醒群主。十分钟内同一个会话只提一次。 */
+async function remindVoice(client, kind, id, original) {
+  if (kind !== 'group' && kind !== 'private') return;
+  const slot = `voice:${kind}:${id}`;
+  if (Date.now() - (nudgeAt.get(slot) || 0) < NUDGE_MS) return;
+  const owner = kind === 'group' ? await groupOwner(client, id) : null;
+  const text = '呜，嗓子还没接上。把 Comfy 打开，人家才能开口说话呀。';
+  nudgeAt.set(slot, Date.now());
+  try {
+    await original.apply(client, [kind, id, text, {
+      atUserId: owner ? owner.id : null,
+      skipVoice: true
+    }]);
+  } catch {
+    nudgeAt.delete(slot);
+  }
+}
 
 function ensureApiServer(c) {
   return probeApiPort(c).then((ok) => {
@@ -806,6 +850,7 @@ function installPatch() {
     const args = [kind, id, text, options];
     const chatKey = `${kind}:${id}`;
     try {
+      if (options?.skipVoice) return original.apply(this, args);
       if (!isActive()) return original.apply(this, args);
 
       const mode = settings().voiceMode;
@@ -830,6 +875,12 @@ function installPatch() {
         return sendPlain();
       }
       const s = resolved.config;
+      const api = await ensureApiServer(s);
+      if (!api.ok) {
+        await remindVoice(this, kind, id, original);
+        note('skipped', api.error || API_DOWN);
+        return sendPlain();
+      }
 
       const startedAt = Date.now();
       const out = await synthesizeToFile(s, resolved.voice, spoken, resolved.language);

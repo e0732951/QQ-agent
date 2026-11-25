@@ -20,7 +20,8 @@
     "width": 1024,
     "height": 1024,
     "steps": 8,
-    "timeoutMs": 180000
+    "timeoutMs": 180000,
+    "memberGapMin": 5
   },
   "configSchema": {
     "enabled": {
@@ -67,6 +68,11 @@
       "type": "number",
       "label": "最长等待（毫秒）",
       "description": "超时后撤掉这一次排队。默认 180000。"
+    },
+    "memberGapMin": {
+      "type": "number",
+      "label": "每个群员间隔（分钟）",
+      "description": "同一个群员两次画画至少隔这么久。默认 5，也就是五分钟最多一张。群主不受限。填 0 表示不限制。"
     }
   }
 }

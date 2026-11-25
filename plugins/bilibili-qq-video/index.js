@@ -136,7 +136,7 @@ function sweepLeftovers() {
   const dir = cacheDir();
   const old = Date.now() - 60 * 60 * 1000;
   for (const name of fs.readdirSync(dir)) {
-    if (!/\.(mp4|flv|m4s|jpg|jpeg|png|webp)$/i.test(name)) continue;
+    if (!/\.(mp4|flv|m4s|m4a|jpg|jpeg|png|webp)$/i.test(name)) continue;
     const file = path.join(dir, name);
     try {
       if (fs.statSync(file).mtimeMs < old) fs.unlinkSync(file);
@@ -276,6 +276,19 @@ function rankCdn(url) {
   return 2;
 }
 
+function pickAudioUrls(play) {
+  const audios = Array.isArray(play?.data?.dash?.audio) ? play.data.dash.audio : [];
+  const ranked = audios
+    .filter((a) => streamUrls(a).length)
+    .sort((a, b) => (Number(a.bandwidth) || 0) - (Number(b.bandwidth) || 0));
+  const chosen = ranked.find((a) => (Number(a.bandwidth) || 0) >= 64000) || ranked[0];
+  if (!chosen) return [];
+  const seen = new Set();
+  return streamUrls(chosen)
+    .filter((u) => allowedCdn(u) && !seen.has(u) && seen.add(u))
+    .sort((a, b) => rankCdn(a) - rankCdn(b));
+}
+
 function pickUrls(play) {
   const videos = Array.isArray(play?.data?.dash?.video) ? play.data.dash.video : [];
   const ranked = videos
@@ -308,23 +321,27 @@ async function playUrl(info, { small = false } = {}) {
       `${base}&qn=64&fnval=1&platform=html5&high_quality=1`
     ];
   let last = '取播放地址失败';
-  let fallback = [];
+  let fallback = null;
   for (const url of tries) {
     const play = await getJson(url);
     if (play.code !== 0) {
       last = play.message || last;
       continue;
     }
-    const found = pickUrls(play);
-    if (!found.length) {
+    const videos = pickUrls(play);
+    if (!videos.length) {
       last = '这个视频没有可下载的画面流';
       continue;
     }
-    // 证书对得上的 B站 CDN 优先。只有镜像站时继续问下一种清晰度。
-    if (found.some((u) => rankCdn(u) === 0)) return found;
-    if (!fallback.length) fallback = found;
+    const pack = { videos, audios: pickAudioUrls(play) };
+    const direct = videos.some((u) => rankCdn(u) === 0);
+    // 有声轨、并且画面在证书对得上的 CDN 上时直接用。否则继续问下一种清晰度。
+    if (direct && pack.audios.length) return pack;
+    if (pack.audios.length && (!fallback || !fallback.audios.length)) fallback = pack;
+    else if (direct && !fallback) fallback = pack;
+    else if (!fallback) fallback = pack;
   }
-  if (fallback.length) return fallback;
+  if (fallback) return fallback;
   throw new Error(last);
 }
 
@@ -410,6 +427,55 @@ function runFfmpeg(args, timeoutMs) {
   });
 }
 
+/**
+ * 画面流经常没有声音。把音轨单独下成 .audio.m4a，交给语音转文字。
+ * 下失败不影响画面。视频文件本身仍由看完后的清理删掉，这份音频不在清理名单里。
+ */
+async function saveAudio(urls, videoPath, seconds, identity) {
+  const audioPath = videoPath.replace(/\.mp4$/i, '') + '.audio.m4a';
+  let saved = fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1024;
+  if (!saved) {
+    for (const one of urls || []) {
+      try {
+        await downloadTo(one, audioPath, settings().maxMb * 1048576);
+        saved = true;
+        break;
+      } catch {
+        try { if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath); } catch { /* 半截删掉 */ }
+      }
+    }
+  }
+  if (!saved) {
+    const extracted = await runFfmpeg([
+      '-y', '-i', videoPath, '-vn', '-c:a', 'aac', '-b:a', '64k', audioPath
+    ], 120000);
+    saved = extracted && fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1024;
+    if (!saved) {
+      try { if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath); } catch { /* 没有音轨 */ }
+    }
+  }
+  if (!saved) return;
+  if (seconds > 0) {
+    const clipped = audioPath.replace(/\.m4a$/i, '') + '.clip.m4a';
+    const ok = await runFfmpeg([
+      '-y', '-i', audioPath, '-t', String(seconds), '-c', 'copy', clipped
+    ], 120000);
+    if (ok && fs.existsSync(clipped) && fs.statSync(clipped).size > 1024) {
+      try { fs.unlinkSync(audioPath); } catch { /* 用裁好的 */ }
+      fs.renameSync(clipped, audioPath);
+    } else {
+      try { fs.unlinkSync(clipped); } catch { /* 没有半截 */ }
+    }
+  }
+  G.pendingAudio = {
+    at: Date.now(),
+    path: audioPath,
+    bvid: String(identity?.bvid || ''),
+    aid: String(identity?.aid || ''),
+    pageUrl: String(identity?.pageUrl || '')
+  };
+}
+
 /** 只保留片头。裁失败就留下整段，调用方已经按体积上限下过了。 */
 async function clipTo(src, seconds) {
   const out = src.replace(/\.mp4$/i, '') + '.clip.mp4';
@@ -425,23 +491,54 @@ async function clipTo(src, seconds) {
   return true;
 }
 
+function hasSavedLines(keys) {
+  const file = path.join(DATA_DIR, 'sovits-speech-to-text', 'video-lines.json');
+  let data = {};
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return false; }
+  return keys.some((key) => String(data[key]?.text || '').trim());
+}
+
+/** 画面描述已经有了，但台词还没有时，只补下音轨。失败不影响把旧描述交回去。 */
+async function ensureAudio(info, pageUrl) {
+  const keys = noteKeys({ bvid: info.bvid, aid: info.aid, pageUrl });
+  if (hasSavedLines(keys)) return;
+  const limitMin = settings().maxMinutes;
+  const over = info.duration > limitMin * 60;
+  const key = (info.bvid || (info.aid ? `av${info.aid}` : '') || 'clip').replace(/[^\w.-]/g, '_');
+  const pack = await playUrl(info, { small: over });
+  await saveAudio(pack.audios, path.join(cacheDir(), `${key}.mp4`), over ? limitMin * 60 : 0, {
+    bvid: info.bvid,
+    aid: info.aid,
+    pageUrl
+  });
+}
+
 export async function fetchBilibiliFile({ bvid = '', aid = '', pageUrl = '' } = {}) {
   const given = noteKeys({ bvid, aid, pageUrl });
   const early = findNote(given);
-  if (early) return { remembered: true, description: early.text, title: early.title };
+  if (early) {
+    try {
+      const info = await resolveIdentity({ bvid, aid, pageUrl });
+      await ensureAudio(info, pageUrl);
+    } catch { /* 旧描述照样返回 */ }
+    return { remembered: true, description: early.text, title: early.title };
+  }
   const info = await resolveIdentity({ bvid, aid, pageUrl });
   const resolved = noteKeys({ bvid: info.bvid || bvid, aid: info.aid || aid, pageUrl });
   const again = findNote(resolved);
-  if (again) return { remembered: true, description: again.text, title: again.title || info.title };
+  if (again) {
+    try { await ensureAudio(info, pageUrl); } catch { /* 旧描述照样返回 */ }
+    return { remembered: true, description: again.text, title: again.title || info.title };
+  }
   const limitMin = settings().maxMinutes;
   const over = info.duration > limitMin * 60;
   const key = (info.bvid || (info.aid ? `av${info.aid}` : '') || 'clip').replace(/[^\w.-]/g, '_');
   const dest = path.join(cacheDir(), `${key}.mp4`);
   if (!(fs.existsSync(dest) && fs.statSync(dest).size > 1024)) {
-    const url = await playUrl(info, { small: over });
+    const pack = await playUrl(info, { small: over });
     const fails = [];
     let saved = false;
-    for (const one of url) {
+    for (const one of pack.videos) {
       try {
         await downloadTo(one, dest, settings().maxMb * 1048576);
         saved = true;
@@ -456,6 +553,11 @@ export async function fetchBilibiliFile({ bvid = '', aid = '', pageUrl = '' } = 
     }
     if (!saved) throw new Error(fails.join('；') || '视频下载失败');
     if (over) await clipTo(dest, limitMin * 60);
+    await saveAudio(pack.audios, dest, over ? limitMin * 60 : 0, {
+      bvid: info.bvid || bvid,
+      aid: info.aid || aid,
+      pageUrl
+    });
   }
   const title = over
     ? `${info.title || 'B站视频'}（片长 ${Math.ceil(info.duration / 60)} 分钟，只看了前 ${limitMin} 分钟）`

@@ -21,16 +21,152 @@ const DEFAULTS = {
   width: 1024,
   height: 1024,
   steps: 8,
-  timeoutMs: 180000
+  timeoutMs: 180000,
+  memberGapMin: 5
 };
 
 let cfgOf = () => ({});
 let log = () => {};
 let drawing = false;
+const RECENT_MS = 3 * 60 * 1000;
+const recentByChat = (globalThis.__comfyDrawRecent = globalThis.__comfyDrawRecent || new Map());
+const drawQuota = (globalThis.__comfyDrawQuota = globalThis.__comfyDrawQuota || new Map());
+const nudgeAt = (globalThis.__comfyNudgeAt = globalThis.__comfyNudgeAt || new Map());
+const NUDGE_MS = 10 * 60 * 1000;
+
+function normPrompt(text) {
+  return String(text || '').toLowerCase().replace(/[\s，。、“”‘’！？、,.!?'"\-：:；;]/g, '');
+}
+
+/** 同一次要求里模型常把提示词改几个字再画一遍。大部分用词一样就当成同一张。 */
+function sameRequest(a, b) {
+  const x = normPrompt(a);
+  const y = normPrompt(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (Math.min(x.length, y.length) >= 16 && (x.includes(y) || y.includes(x))) return true;
+  const count = (s) => {
+    const g = new Map();
+    for (let i = 0; i < s.length - 1; i += 1) {
+      const k = s.slice(i, i + 2);
+      g.set(k, (g.get(k) || 0) + 1);
+    }
+    return g;
+  };
+  const gx = count(x);
+  const gy = count(y);
+  let inter = 0;
+  let left = 0;
+  let right = 0;
+  for (const n of gx.values()) left += n;
+  for (const [k, n] of gy) {
+    right += n;
+    inter += Math.min(n, gx.get(k) || 0);
+  }
+  const total = left + right;
+  return total > 0 && (2 * inter) / total >= 0.82;
+}
 
 function cfg() {
   const raw = cfgOf() || {};
-  return { ...DEFAULTS, ...raw };
+  const merged = { ...DEFAULTS, ...raw };
+  const gap = Number(merged.memberGapMin);
+  merged.memberGapMin = Number.isFinite(gap) ? Math.max(0, Math.min(120, Math.round(gap))) : 5;
+  return merged;
+}
+
+function requesterId(ctx) {
+  const list = ctx?.session?.trigger;
+  const self = String(ctx?.selfId || '');
+  if (!Array.isArray(list)) return '';
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const id = String(list[i]?.senderId || '');
+    if (id && id !== 'self' && id !== self) return id;
+  }
+  return '';
+}
+
+async function groupOwner(onebot, groupId) {
+  const box = globalThis.__qqGroupOwner = globalThis.__qqGroupOwner || new Map();
+  const key = String(groupId);
+  const hit = box.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit;
+  if (!onebot?.call) return hit || null;
+  let list = [];
+  try {
+    const data = await onebot.call('get_group_member_list', { group_id: Number(groupId) });
+    list = Array.isArray(data) ? data : [];
+  } catch {
+    return hit || null;
+  }
+  const owner = list.find((m) => m && m.role === 'owner' && m.user_id != null);
+  if (!owner) return hit || null;
+  const info = {
+    id: String(owner.user_id),
+    name: String(owner.card || owner.nickname || ''),
+    at: Date.now()
+  };
+  box.set(key, info);
+  return info;
+}
+
+async function comfyReady() {
+  const c = cfg();
+  if (c.enabled === false) return { ok: false, error: '本地生图已经关掉。' };
+  try {
+    const alive = await readJson(`${baseOf(c)}/system_stats`, 4000);
+    if (!alive.ok) return { ok: false, down: true };
+    return { ok: true };
+  } catch {
+    return { ok: false, down: true };
+  }
+}
+
+async function remindDraw(ctx) {
+  const chatKey = String(ctx?.chatKey || '');
+  const [kind, id] = chatKey.split(':');
+  if (kind !== 'group' && kind !== 'private') return false;
+  const slot = `draw:${chatKey}`;
+  if (Date.now() - (nudgeAt.get(slot) || 0) < NUDGE_MS) return false;
+  const onebot = ctx?.onebot;
+  if (!onebot?.sendText) return false;
+  const owner = kind === 'group' ? await groupOwner(onebot, id) : null;
+  const asker = requesterId(ctx);
+  const toOwner = Boolean(owner && asker === owner.id);
+  const text = toOwner
+    ? '呜……画画的小炉子还没点着。群主把 Comfy 打开一下嘛。'
+    : '呜……画画的小炉子还没点着，把 Comfy 打开一下嘛。';
+  nudgeAt.set(slot, Date.now());
+  try {
+    await onebot.sendText(kind, id, text, {
+      atUserId: !toOwner && owner ? owner.id : null,
+      skipVoice: true
+    });
+    return true;
+  } catch {
+    nudgeAt.delete(slot);
+    return false;
+  }
+}
+
+/** 群员冷却。群主不限。返回字符串就是要拒绝的原因；返回 { key } 表示这次可以画，成功后再记账。 */
+async function quotaHold(ctx) {
+  const gap = cfg().memberGapMin;
+  if (gap <= 0) return null;
+  const [kind, id] = String(ctx?.chatKey || '').split(':');
+  if (kind !== 'group') return null;
+  const who = requesterId(ctx);
+  if (!who) return null;
+  const owner = await groupOwner(ctx?.onebot, id);
+  if (owner && who === owner.id) return null;
+  const key = `${id}:${who}`;
+  const last = drawQuota.get(key) || 0;
+  const wait = gap * 60 * 1000 - (Date.now() - last);
+  if (wait > 0) {
+    const left = Math.max(1, Math.ceil(wait / 60000));
+    return `这个人 ${gap} 分钟内已经画过一张了，还要再等大约 ${left} 分钟。用一句短的让他们再等等，不要再画。`;
+  }
+  return { key };
 }
 
 function snap(n, fallback) {
@@ -247,10 +383,90 @@ export function promptSections() {
     content: [
       `对方明确让你画画、画一张、按描述出图时，调用 ${TOOL}。`,
       'prompt 写看得见的画面：主体、动作、场景、颜色、构图。中文或英文都可以。不要写好不好看这类评价。',
-      '图会直接发到当前聊天。不要再调用 send_image 或 search_images 去找一张替代，也不要说“已发送”。想配话就另发一句短的。',
-      '没人要求你画的时候不要调用。ComfyUI 没开或正在画上一张时，工具会告诉你失败原因，照实说，不要假装已经画了。'
+      '图会直接发到当前聊天。一次要求只画一张，不要连着再调一次。不要再调用 send_image 或 search_images 去找一张替代，也不要说“已发送”。想配话就另发一句短的。',
+      '没人要求你画的时候不要调用。同一个群员默认五分钟只能画一张，群主不限；到了上限就用一句短的让他们再等等。Comfy 没开时工具会自己提醒群主，不要再复述那句提醒，也不要假装已经画了。'
     ].join('')
   }];
+}
+
+function timedOut(msg) {
+  return /超时|timeout|abort/i.test(String(msg || ''));
+}
+
+/** 发送超时后看群里是不是已经有这张图，避免重发变成两张。 */
+async function alreadyInChat(ctx, sinceMs) {
+  const onebot = ctx?.onebot;
+  const [kind, id] = String(ctx?.chatKey || '').split(':');
+  const selfId = String(ctx?.selfId || onebot?.selfId || '');
+  if (!onebot?.call || !selfId || (kind !== 'group' && kind !== 'private')) return null;
+  try {
+    const data = kind === 'group'
+      ? await onebot.call('get_group_msg_history', { group_id: Number(id), count: 8 }, 8000)
+      : await onebot.call('get_friend_msg_history', { user_id: Number(id), count: 8 }, 8000);
+    const messages = Array.isArray(data?.messages) ? data.messages : [];
+    const sinceSec = Math.floor(sinceMs / 1000) - 3;
+    for (const msg of messages) {
+      const uid = String(msg?.user_id ?? msg?.sender?.user_id ?? '');
+      if (uid !== selfId) continue;
+      const rawTime = Number(msg?.time || 0);
+      const sec = rawTime > 1e12 ? Math.floor(rawTime / 1000) : rawTime;
+      if (!sec || sec < sinceSec) continue;
+      const segs = Array.isArray(msg?.message) ? msg.message : [];
+      const raw = typeof msg?.raw_message === 'string' ? msg.raw_message : '';
+      if (segs.some((s) => s?.type === 'image') || /\[CQ:image|\[图片\]/.test(raw)) {
+        return { message_id: msg.message_id ?? null };
+      }
+    }
+  } catch { /* 查不到就当真的没发出去 */ }
+  return null;
+}
+
+function sentOk(ctx, width, height, messageId, started) {
+  if (ctx.session?.sent) {
+    ctx.session.sent.push({
+      type: 'image',
+      text: '[图片]',
+      at: new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    });
+  }
+  ctx.emit?.('session-update', ctx.session?.id);
+  log(`已发图，用时 ${Math.round((Date.now() - started) / 1000)} 秒`);
+  return {
+    content: `图已经发到当前聊天（${width}×${height}，消息 id ${messageId ?? '未知'}）。不要再调用 send_image，不要再画一次，不要说已发送。想配话就另发一句短的。`
+  };
+}
+
+async function sendDrawn(ctx, args, saved, width, height, started) {
+  const bytes = fs.readFileSync(saved);
+  if (!ctx?.sender || typeof ctx.sender.sendImage !== 'function') {
+    return { content: '图已经生成，但当前会话发不出去。', isError: true };
+  }
+  let lastMsg = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const began = Date.now();
+    try {
+      const sent = await ctx.sender.sendImage(ctx.chatKey, {
+        file: saved,
+        dataUrl: `base64://${bytes.toString('base64')}`
+      }, {
+        replyToMessageId: args?.replyToMessageId ?? null
+      });
+      return sentOk(ctx, width, height, sent?.message_id, started);
+    } catch (error) {
+      lastMsg = String(error?.message ?? error);
+      if (/刚刚发过|已跳过/.test(lastMsg)) {
+        return { content: '这张图刚刚已经发到当前聊天了。不要再画，不要再说已发送。' };
+      }
+      const found = await alreadyInChat(ctx, began);
+      if (found) return sentOk(ctx, width, height, found.message_id, started);
+      if (!timedOut(lastMsg) || attempt === 1) break;
+      log('发图超时，自动再发一次');
+    }
+  }
+  return {
+    content: `图已经生成，但发送失败：${lastMsg}。已经自动重发过了。不要叫对方再喊一次。`,
+    isError: true
+  };
 }
 
 export function setup(api) {
@@ -280,35 +496,56 @@ export function setup(api) {
     },
     async execute(ctx, args) {
       const started = Date.now();
-      const made = await generateStill({ prompt: args?.prompt, width: args?.width, height: args?.height });
-      if (!made.ok) return { content: `${made.error} 不要假装已经画了。`, isError: true };
-      const saved = made.file;
-      const bytes = fs.readFileSync(saved);
-      try {
-        if (!ctx?.sender || typeof ctx.sender.sendImage !== 'function') {
-          return { content: '图已经生成，但当前会话发不出去。', isError: true };
+      const prompt = String(args?.prompt || '');
+      const chatKey = String(ctx?.chatKey || '');
+      const prev = recentByChat.get(chatKey);
+      if (prev && Date.now() - prev.at < RECENT_MS && sameRequest(prev.prompt, prompt)) {
+        if (prev.sent) {
+          return { content: '这张图刚刚已经发到当前聊天了。不要再画，不要再说已发送。' };
         }
-        const sent = await ctx.sender.sendImage(ctx.chatKey, {
-          file: saved,
-          dataUrl: `base64://${bytes.toString('base64')}`
-        }, {
-          replyToMessageId: args?.replyToMessageId ?? null
-        });
-        if (ctx.session?.sent) {
-          ctx.session.sent.push({
-            type: 'image',
-            text: '[图片]',
-            at: new Date().toLocaleTimeString('zh-CN', { hour12: false })
-          });
+        if (prev.file && fs.existsSync(prev.file)) {
+          const again = await sendDrawn(ctx, args, prev.file, prev.width, prev.height, started);
+          if (!again.isError) recentByChat.set(chatKey, { ...prev, sent: true, at: Date.now() });
+          return again;
         }
-        ctx.emit?.('session-update', ctx.session?.id);
-        log(`已发图 ${Math.round(bytes.length / 1024)}KB，用时 ${Math.round((Date.now() - started) / 1000)} 秒`);
-        return {
-          content: `图已经发到当前聊天（${made.width}×${made.height}，消息 id ${sent?.message_id ?? '未知'}）。不要再调用 send_image，不要说已发送。想配话就另发一句短的。`
-        };
-      } catch (error) {
-        return { content: `图已经生成，但发送失败：${error?.message ?? error}`, isError: true };
       }
+      const up = await comfyReady();
+      if (!up.ok && up.down) {
+        const told = await remindDraw(ctx);
+        return {
+          content: told
+            ? 'Comfy 没开。已经在聊天里卖萌提醒群主去打开了。不要再画，也不要再复述这句提醒。'
+            : 'Comfy 没开，刚才已经提醒过群主了。不要再画，也不要再提醒。',
+          isError: true
+        };
+      }
+      if (!up.ok) return { content: `${up.error} 不要假装已经画了。`, isError: true };
+      const hold = await quotaHold(ctx);
+      if (typeof hold === 'string') return { content: hold, isError: true };
+      let made = await generateStill({ prompt, width: args?.width, height: args?.height });
+      if (!made.ok && timedOut(made.error)) {
+        log('画画超时，自动再画一次');
+        made = await generateStill({ prompt, width: args?.width, height: args?.height });
+      }
+      if (!made.ok) {
+        const extra = timedOut(made.error) ? '已经自动重画过了。不要叫对方再喊一次。' : '不要假装已经画了。';
+        return { content: `${made.error} ${extra}`, isError: true };
+      }
+      if (hold?.key) drawQuota.set(hold.key, Date.now());
+      recentByChat.set(chatKey, {
+        at: Date.now(),
+        prompt,
+        file: made.file,
+        width: made.width,
+        height: made.height,
+        sent: false
+      });
+      const sent = await sendDrawn(ctx, args, made.file, made.width, made.height, started);
+      if (!sent.isError) {
+        const cur = recentByChat.get(chatKey);
+        if (cur) recentByChat.set(chatKey, { ...cur, sent: true, at: Date.now() });
+      }
+      return sent;
     }
   });
 }

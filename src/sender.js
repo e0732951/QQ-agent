@@ -306,6 +306,7 @@ export class SendQueue {
       this.#checkRate(chatKey);
       await sleep(randInt(500, 1300));   // 发图前真人式的短暂停顿
 
+      const started = Date.now();
       let data;
       try {
         data = await this.onebot.sendImage(kind, id, ref, {
@@ -313,14 +314,26 @@ export class SendQueue {
           atUserId: options.atUserId ?? null
         });
       } catch (error) {
-        // file:// 失败 → 回退 base64（协议端不同机、路径不可读、权限不足等）。
-        // 只在**有 dataUrl 备份**且**确实是 local 路径**时才回退，避免无意义重试。
-        if (!file || !dataUrl) throw error;
-        this.log?.(`本地路径发送失败（${error?.message ?? error}），回退 base64 重试一次`);
-        data = await this.onebot.sendImage(kind, id, dataUrl, {
-          replyToMessageId: options.replyToMessageId ?? null,
-          atUserId: options.atUserId ?? null
-        });
+        // 超时只说明 HTTP 没等到回包。协议端经常已经把图发出去了，
+        // 这时再发一遍 base64 会在群里出现两张相同的图。
+        const timedOut = /超时|timeout|abort/i.test(String(error?.message ?? error));
+        if (file && timedOut) {
+          const found = await this.#findRecentSelfImage(chatKey, started);
+          if (found) {
+            this.log?.('本地路径发送超时，但群里已经有这张图，不再发第二次');
+            data = found;
+          }
+        }
+        if (!data) {
+          // file:// 失败 → 回退 base64（协议端不同机、路径不可读、权限不足等）。
+          // 只在**有 dataUrl 备份**且**确实是 local 路径**时才回退，避免无意义重试。
+          if (!file || !dataUrl) throw error;
+          this.log?.(`本地路径发送失败（${error?.message ?? error}），回退 base64 重试一次`);
+          data = await this.onebot.sendImage(kind, id, dataUrl, {
+            replyToMessageId: options.replyToMessageId ?? null,
+            atUserId: options.atUserId ?? null
+          });
+        }
       }
       this.#markSent(chatKey, `__img__${dedupeKey}`);   // 发图同样：成功后才记账
       const ts = Date.now();
@@ -329,6 +342,39 @@ export class SendQueue {
       this.onSent?.({ chatKey, text: `[图片${note}]`, messageId: data?.message_id ?? null, kind: 'image' });
       return { message_id: data?.message_id ?? null };
     });
+  }
+
+  /**
+   * 发送超时后看最近几条里有没有自己刚发出的图。
+   * 有的话说明协议端已经发出去了，调用方不要再发一次。
+   */
+  async #findRecentSelfImage(chatKey, startedMs) {
+    const [kind, id] = String(chatKey).split(':');
+    const selfId = String(this.onebot?.selfId || '');
+    if (!selfId || (kind !== 'group' && kind !== 'private')) return null;
+    await sleep(1500);
+    let messages = [];
+    try {
+      const data = kind === 'group'
+        ? await this.onebot.call('get_group_msg_history', { group_id: Number(id), count: 8 }, 8000)
+        : await this.onebot.call('get_friend_msg_history', { user_id: Number(id), count: 8 }, 8000);
+      messages = Array.isArray(data?.messages) ? data.messages : [];
+    } catch {
+      return null;
+    }
+    const sinceSec = Math.floor(startedMs / 1000) - 3;
+    for (const msg of messages) {
+      const uid = String(msg?.user_id ?? msg?.sender?.user_id ?? '');
+      if (uid !== selfId) continue;
+      const rawTime = Number(msg?.time || 0);
+      const sec = rawTime > 1e12 ? Math.floor(rawTime / 1000) : rawTime;
+      if (!sec || sec < sinceSec) continue;
+      const segs = Array.isArray(msg?.message) ? msg.message : [];
+      const raw = typeof msg?.raw_message === 'string' ? msg.raw_message : '';
+      const hasImage = segs.some((s) => s?.type === 'image') || /\[CQ:image|\[图片\]/.test(raw);
+      if (hasImage) return { message_id: msg.message_id ?? null };
+    }
+    return null;
   }
 
   /**

@@ -4,13 +4,14 @@
   "version": "1.0.0",
   "apiVersion": 1,
   "category": "media",
-  "description": "把别人发来的 QQ 语音，用 comfy-dafeiyu 里的中文 FunASR 转成文字，写进对话里给模型看。识别服务随那个项目启动和退出，本插件只负责调用，不再自己拉起或关掉进程。失败就保持原来的「[语音]」占位，不会把消息弄丢。",
+  "description": "把别人发来的 QQ 语音，以及看视频时的声音，用 comfy-dafeiyu 里的中文 FunASR 转成文字给模型看。台词文字留下，音频文件看完就删。识别服务随那个项目启动和退出，本插件只负责调用。失败就保持原来的「[语音]」占位，不会把消息弄丢。",
   "author": "本机定制",
   "entry": "index.js",
   "permissions": [],
   "enabledByDefault": true,
   "capabilities": [
-    "media.transcribe"
+    "media.transcribe",
+    "video.transcript"
   ],
   "requires": [],
   "settings": {
